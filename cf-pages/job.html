@@ -504,6 +504,36 @@ const params = new URLSearchParams(window.location.search);
 const JOB_ID = params.get("job_id") || window.location.pathname.split("/").pop();
 let INITIAL_STATUS = "running";
 
+let _metricsInterval = null;
+function startMetricsPolling() {
+  if (_metricsInterval || !window._vllmMetricsUrl) return;
+  _metricsInterval = setInterval(async () => {
+    try {
+      const resp = await fetch(window._vllmMetricsUrl);
+      const text = await resp.text();
+      let done = 0;
+      for (const line of text.split("\n")) {
+        if (line.includes("vllm:request_success_total") && !line.startsWith("#")) {
+          const m = line.match(/finished_reason="(stop|length)".*?}\s+([\d.]+)/);
+          if (m) done += parseFloat(m[2]);
+        }
+      }
+      const total = window._vllmTotal || 0;
+      if (total > 0) {
+        const pct = Math.min(100, Math.round(done / total * 100));
+        document.getElementById("progress-box").style.display = "";
+        document.getElementById("progress-bar").style.width = pct + "%";
+        document.getElementById("progress-pct").textContent = pct + "%";
+        document.getElementById("progress-label").textContent = `vLLM完了: ${Math.round(done)}/${total} | ${pct}%`;
+      }
+      if (INITIAL_STATUS === "done" && _metricsInterval) {
+        clearInterval(_metricsInterval);
+        _metricsInterval = null;
+      }
+    } catch(e) {}
+  }, 3000);
+}
+
 async function loadJob() {
   const resp = await fetch(`https://api.phaino-ai.com/api/job/${JOB_ID}`);
   if (!resp.ok) return;
@@ -543,9 +573,18 @@ async function loadJob() {
     box.textContent = job.log;
     logOffset = job.log.length;
 
+    // vLLM URLをログから抽出
+    const urlMatch = job.log.match(/vLLM URL: (https?:\/\/[^\s]+\/v1)/);
+    if (urlMatch) {
+      window._vllmMetricsUrl = urlMatch[1].replace("/v1", "") + "/metrics";
+      // totalをログから抽出
+      const totalMatch = job.log.match(/LLM: \d+\/(\d+)/);
+      if (totalMatch) window._vllmTotal = parseInt(totalMatch[1]);
+    }
+
     const matches = [...job.log.matchAll(/LLM: (\d+)\/(\d+) 関数完了 \| 脆弱性候補: (\d+)件/g)];
     if (matches.length > 0) {
-      const last = matches[matches.length - 1];
+      const last = matches.reduce((a, b) => parseInt(a[1]) > parseInt(b[1]) ? a : b);
       const done = parseInt(last[1]), total = parseInt(last[2]), vulns = parseInt(last[3]);
       const pct = total > 0 ? Math.round(done / total * 100) : 0;
       document.getElementById("progress-box").style.display = "";
@@ -555,7 +594,9 @@ async function loadJob() {
     }
   }
 }
-loadJob();
+loadJob().then(() => {
+  if (window._vllmMetricsUrl) startMetricsPolling();
+});
 
 // ===========================
 // ライブポーリング（running/queuedのみ）
@@ -576,6 +617,17 @@ async function pollLog() {
       const box = document.getElementById("log-box");
       box.textContent += data.log;
       logOffset = data.offset;
+
+      // vLLM URLが新しいログに含まれてたら抽出
+      if (!window._vllmMetricsUrl) {
+        const urlMatch = data.log.match(/vLLM URL: (https?:\/\/[^\s]+\/v1)/);
+        if (urlMatch) {
+          window._vllmMetricsUrl = urlMatch[1].replace("/v1", "") + "/metrics";
+          const totalMatch = box.textContent.match(/LLM: \d+\/(\d+)/);
+          if (totalMatch) window._vllmTotal = parseInt(totalMatch[1]);
+          startMetricsPolling();
+        }
+      }
 
       // プログレスバー更新
       const allLog = box.textContent;
