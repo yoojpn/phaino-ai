@@ -537,7 +537,7 @@ if (["queued", "running"].includes(INITIAL_STATUS)) {
 
 async function pollLog() {
   try {
-    const resp = await fetch(`https://phaino-ai.com/api/job/${JOB_ID}/log?offset=${logOffset}`, { credentials: "include" });
+    const resp = await fetch(`https://phaino-ai.com/api/job/${JOB_ID}/log?offset=${logOffset}`, {  });
     const data = await resp.json();
 
     if (data.log) {
@@ -573,7 +573,7 @@ async function pollLog() {
 async function cancelJob() {
   if (!confirm("このジョブをキャンセルしますか？")) return;
   try {
-    const resp = await fetch(`https://phaino-ai.com/api/job/${JOB_ID}/cancel`, { method: "POST", credentials: "include" });
+    const resp = await fetch(`https://phaino-ai.com/api/job/${JOB_ID}/cancel`, { method: "POST",  });
     if (resp.ok) {
       location.reload();
     } else {

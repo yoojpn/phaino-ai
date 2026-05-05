@@ -647,7 +647,7 @@ async function submitForm(formId, endpoint, isMultipart) {
         fd.set(key, form.querySelector(`[name=${key}]`).checked ? "true" : "false");
       });
 
-      const resp = await fetch(endpoint, { method: "POST", body: fd, credentials: "include" });
+      const resp = await fetch(endpoint, { method: "POST", body: fd,  });
       if (!resp.ok) {
         const err = await resp.json();
         alert("エラー: " + (err.detail || resp.statusText));
@@ -673,7 +673,7 @@ submitForm("form-multi",  "https://phaino-ai.com/api/scan/multi",  false);
 // ===========================
 async function loadJobs() {
   try {
-    const resp = await fetch("https://phaino-ai.com/api/jobs", { credentials: "include" });
+    const resp = await fetch("https://phaino-ai.com/api/jobs", {  });
     if (!resp.ok) return;
     const jobs = await resp.json();
     const tbody = document.getElementById("job-tbody");
@@ -706,7 +706,7 @@ setInterval(loadJobs, 10000);
 // ===========================
 async function updateRunpodBadge() {
   try {
-    const resp = await fetch("https://phaino-ai.com/api/runpod/status", { credentials: "include" });
+    const resp = await fetch("https://phaino-ai.com/api/runpod/status", {  });
     const data = await resp.json();
     const badge = document.getElementById("runpod-badge");
     if (!data.configured) {
