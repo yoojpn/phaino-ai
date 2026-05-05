@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>phaino_ai - 脆弱性スキャン</title>
+<style>
+/* phaino_ai - Web UI スタイル */
+
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --accent-hover: #79c0ff;
+  --danger: #f85149;
+  --success: #3fb950;
+  --warning: #d29922;
+  --pending: #a371f7;
+  --radius: 8px;
+  --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", "Monaco", monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
+
+/* ===========================
+   Header
+   =========================== */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.header-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.logo {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.5px;
+}
+.subtitle {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.runpod-badge {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+.runpod-badge.status-running { color: var(--success); border-color: var(--success); }
+.runpod-badge.status-pending { color: var(--pending); border-color: var(--pending); }
+.runpod-badge.status-idle    { color: var(--text-muted); }
+.runpod-badge.status-error   { color: var(--danger); border-color: var(--danger); }
+
+/* ===========================
+   Layout
+   =========================== */
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+.card h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: var(--text);
+}
+.card h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+/* ===========================
+   Tabs
+   =========================== */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 16px;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ===========================
+   Forms
+   =========================== */
+.form-group { margin-bottom: 16px; }
+.form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.form-group input[type="url"],
+.form-group input[type="text"] {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.form-group input:focus { border-color: var(--accent); }
+
+.form-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.form-options label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.form-options select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 6px;
+  margin-left: 4px;
+}
+
+/* Drop zone */
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 40px 20px;
+  text-align: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: border-color 0.15s, background 0.15s;
+}
+.drop-zone:hover, .drop-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(88,166,255,0.05);
+}
+.drop-zone input[type="file"] { display: none; }
+.file-selected {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: 13px;
+}
+
+/* ===========================
+   Buttons
+   =========================== */
+.btn-primary {
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  color: #000;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 20px;
+  transition: background 0.15s;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-danger {
+  background: transparent;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  transition: background 0.15s;
+}
+.btn-danger:hover { background: rgba(248,81,73,0.1); }
+
+.btn-small {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.btn-small:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ===========================
+   Badges
+   =========================== */
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.badge-type     { background: rgba(88,166,255,0.1); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+.badge-queued   { background: rgba(163,113,247,0.1); color: var(--pending); border: 1px solid rgba(163,113,247,0.3); }
+.badge-running  { background: rgba(210,153,34,0.1); color: var(--warning); border: 1px solid rgba(210,153,34,0.3); }
+.badge-done     { background: rgba(63,185,80,0.1); color: var(--success); border: 1px solid rgba(63,185,80,0.3); }
+.badge-error    { background: rgba(248,81,73,0.1); color: var(--danger); border: 1px solid rgba(248,81,73,0.3); }
+.badge-cancelled { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+.badge-disabled { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); font-size: 11px; padding: 2px 8px; border-radius: 20px; }
+
+/* ===========================
+   Job Table
+   =========================== */
+.job-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.job-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.job-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.job-table tr:last-child td { border-bottom: none; }
+.job-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+.target-cell {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.time-cell { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.result-mini { font-size: 12px; color: var(--text-muted); }
+.empty { text-align: center; color: var(--text-muted); padding: 40px; }
+
+/* ===========================
+   Job Detail
+   =========================== */
+.job-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.target-title {
+  font-size: 15px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  word-break: break-all;
+  margin-bottom: 8px;
+}
+.job-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.job-actions { display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+.options-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Summary grid */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 16px;
+}
+.summary-item {
+  text-align: center;
+  padding: 16px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.summary-num {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+}
+.summary-label { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.summary-confirmed .summary-num { color: var(--success); }
+.summary-practical .summary-num { color: var(--warning); }
+.summary-reported .summary-num  { color: var(--accent); }
+
+/* Log box */
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.log-header label {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.log-box {
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: #7ee787;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  max-height: 600px;
+  overflow-y: auto;
+  padding: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ===========================
+   Overlay
+   =========================== */
+.submitting-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  gap: 16px;
+  color: var(--text);
+}
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===========================
+   Responsive
+   =========================== */
+@media (max-width: 640px) {
+  .container { padding: 16px; }
+  .card { padding: 16px; }
+  .form-options { flex-direction: column; align-items: flex-start; }
+  .header-inner { flex-wrap: wrap; }
+  .job-table { font-size: 12px; }
+  .job-table th:nth-child(4),
+  .job-table td:nth-child(4) { display: none; }
+}
+
+</style>
+</head>
+<body>
+<header class="header">
+  <div class="header-inner">
+    <span class="logo">⚡ phaino_ai</span>
+    <span class="subtitle">脆弱性検出特化AIパイプライン</span>
+    <div class="runpod-badge" id="runpod-badge">● RunPod確認中...</div>
+  </div>
+</header>
+
+<main class="container">
+  <!-- スキャンフォーム -->
+  <section class="card">
+    <h2>スキャン対象を選択</h2>
+
+    <!-- タブ -->
+    <div class="tabs">
+      <button class="tab active" data-tab="github">GitHub URL</button>
+      <button class="tab" data-tab="zip">ZIP アップロード</button>
+      <button class="tab" data-tab="web">Web URL</button>
+    </div>
+
+    <!-- GitHub -->
+    <div class="tab-content active" id="tab-github">
+      <form id="form-github">
+        <div class="form-group">
+          <label>リポジトリURL</label>
+          <input type="url" name="repo_url" placeholder="https://github.com/owner/repo" required>
+        </div>
+        <div class="form-options">
+<label>最低Exploitability:
+            <select name="min_exploitability">
+              <option value="practical" selected>practical（推奨）</option>
+              <option value="confirmed">confirmed のみ</option>
+              <option value="theoretical">theoretical 以上（全件）</option>
+            </select>
+          </label>
+          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
+          <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label><input type="checkbox" name="no_react"> ReActループ無効</label>
+        </div>
+        <button type="submit" class="btn-primary">スキャン開始</button>
+      </form>
+    </div>
+
+    <!-- ZIP -->
+    <div class="tab-content" id="tab-zip">
+      <form id="form-zip" enctype="multipart/form-data">
+        <div class="form-group">
+          <label>ZIPファイル（最大200MB）</label>
+          <div class="drop-zone" id="drop-zone">
+            <span>ここにZIPをドロップ、またはクリックして選択</span>
+            <input type="file" name="file" accept=".zip" id="zip-input">
+          </div>
+          <div id="zip-filename" class="file-selected" style="display:none"></div>
+        </div>
+        <div class="form-options">
+<label>最低Exploitability:
+            <select name="min_exploitability">
+              <option value="practical" selected>practical（推奨）</option>
+              <option value="confirmed">confirmed のみ</option>
+              <option value="theoretical">theoretical 以上（全件）</option>
+            </select>
+          </label>
+          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
+          <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label><input type="checkbox" name="no_react"> ReActループ無効</label>
+        </div>
+        <button type="submit" class="btn-primary">スキャン開始</button>
+      </form>
+    </div>
+
+    <!-- Web URL -->
+    <div class="tab-content" id="tab-web">
+      <form id="form-web">
+        <div class="form-group">
+          <label>WebサイトURL（JS/HTML/APIを自動クロール）</label>
+          <input type="url" name="site_url" placeholder="https://example.com" required>
+        </div>
+        <div class="form-options">
+<label>最低Exploitability:
+            <select name="min_exploitability">
+              <option value="practical" selected>practical（推奨）</option>
+              <option value="confirmed">confirmed のみ</option>
+              <option value="theoretical">theoretical 以上（全件）</option>
+            </select>
+          </label>
+          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
+          <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label><input type="checkbox" name="no_react"> ReActループ無効</label>
+        </div>
+        <button type="submit" class="btn-primary">スキャン開始</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- 送信中オーバーレイ -->
+  <div class="submitting-overlay" id="submitting-overlay" style="display:none">
+    <div class="spinner"></div>
+    <p>ジョブを登録中...</p>
+  </div>
+
+  <!-- ジョブ履歴 -->
+  <section class="card">
+    <h2>ジョブ履歴</h2>
+    <table class="job-table">
+      <thead>
+        <tr>
+          <th>対象</th>
+          <th>種別</th>
+          <th>ステータス</th>
+          <th>結果</th>
+          <th>作成日時</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in jobs %}
+        <tr>
+          <td class="target-cell" title="{{ job.target_display }}">{{ job.target_display | truncate(40) }}</td>
+          <td><span class="badge badge-type">{{ job.target_type }}</span></td>
+          <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
+          <td>
+            {% if job.result_summary %}
+              <span class="result-mini">
+                ✅{{ job.result_summary.confirmed }} 
+                ⚠️{{ job.result_summary.practical }}
+                / {{ job.result_summary.reported }}件報告
+              </span>
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td class="time-cell">{{ job.created_at[:16].replace("T"," ") }}</td>
+          <td>
+            <a href="https://phaino-ai.com/job/{{ job.id }}" class="btn-small">詳細</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty">ジョブがありません</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+// ===========================
+// タブ切り替え
+// ===========================
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById("tab-" + tab.dataset.tab).classList.add("active");
+  });
+});
+
+// ===========================
+// ZIPドロップゾーン
+// ===========================
+const dropZone = document.getElementById("drop-zone");
+const zipInput = document.getElementById("zip-input");
+const zipFilename = document.getElementById("zip-filename");
+
+dropZone.addEventListener("click", () => zipInput.click());
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+dropZone.addEventListener("drop", e => {
+  e.preventDefault();
+  dropZone.classList.remove("drag-over");
+  const file = e.dataTransfer.files[0];
+  if (file && file.name.endsWith(".zip")) {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    zipInput.files = dt.files;
+    showFilename(file.name);
+  }
+});
+zipInput.addEventListener("change", () => {
+  if (zipInput.files[0]) showFilename(zipInput.files[0].name);
+});
+function showFilename(name) {
+  dropZone.style.display = "none";
+  zipFilename.style.display = "block";
+  zipFilename.textContent = "📦 " + name;
+}
+
+// ===========================
+// フォーム送信
+// ===========================
+async function submitForm(formId, endpoint, isMultipart) {
+  const form = document.getElementById(formId);
+  const overlay = document.getElementById("submitting-overlay");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    overlay.style.display = "flex";
+
+    try {
+      const fd = new FormData(form);
+      // チェックボックスをboolに変換
+      ["no_codeql","no_docker","no_react"].forEach(key => {
+        fd.set(key, form.querySelector(`[name=${key}]`).checked ? "true" : "false");
+      });
+
+      const resp = await fetch(endpoint, { method: "POST", body: fd, credentials: "include" });
+      if (!resp.ok) {
+        const err = await resp.json();
+        alert("エラー: " + (err.detail || resp.statusText));
+        return;
+      }
+      const data = await resp.json();
+      window.location.href = "https://phaino-ai.com/job/" + data.job_id;
+    } catch(err) {
+      alert("送信エラー: " + err.message);
+    } finally {
+      overlay.style.display = "none";
+    }
+  });
+}
+
+submitForm("form-github", "https://phaino-ai.com/api/scan/github", false);
+submitForm("form-zip",    "https://phaino-ai.com/api/scan/zip",    true);
+submitForm("form-web",    "https://phaino-ai.com/api/scan/web",    false);
+
+// ===========================
+// RunPodステータス
+// ===========================
+async function updateRunpodBadge() {
+  try {
+    const resp = await fetch("https://phaino-ai.com/api/runpod/status", { credentials: "include" });
+    const data = await resp.json();
+    const badge = document.getElementById("runpod-badge");
+    if (!data.configured) {
+      badge.textContent = "● RunPod未設定";
+      badge.className = "runpod-badge status-error";
+    } else if (data.vllm_healthy) {
+      badge.textContent = "● RunPod稼働中";
+      badge.className = "runpod-badge status-running";
+    } else if (data.pod_status === "RUNNING") {
+      badge.textContent = "● vLLM起動中...";
+      badge.className = "runpod-badge status-pending";
+    } else {
+      badge.textContent = "● RunPod待機中";
+      badge.className = "runpod-badge status-idle";
+    }
+  } catch(e) {}
+}
+updateRunpodBadge();
+setInterval(updateRunpodBadge, 15000);
+</script>
+</body>
+</html>

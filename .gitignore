@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env.oracle
+*.db
+*.log
+.env
+.env.oracle
