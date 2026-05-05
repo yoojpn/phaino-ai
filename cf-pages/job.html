@@ -460,7 +460,7 @@ a:hover { color: var(--accent-hover); }
         <button class="btn-danger" id="cancel-btn" onclick="cancelJob()">キャンセル</button>
         {% endif %}
         {% if job.status == "done" %}
-        <a href="http://152.69.200.74:8080/api/job/{{ job.id }}/report" class="btn-primary" download>📄 レポートDL</a>
+        <a href="https://api.phaino-ai.com/api/job/{{ job.id }}/report" class="btn-primary" download>📄 レポートDL</a>
         {% endif %}
       </div>
     </div>
@@ -537,7 +537,7 @@ if (["queued", "running"].includes(INITIAL_STATUS)) {
 
 async function pollLog() {
   try {
-    const resp = await fetch(`http://152.69.200.74:8080/api/job/${JOB_ID}/log?offset=${logOffset}`, {  });
+    const resp = await fetch(`https://api.phaino-ai.com/api/job/${JOB_ID}/log?offset=${logOffset}`, {  });
     const data = await resp.json();
 
     if (data.log) {
@@ -573,7 +573,7 @@ async function pollLog() {
 async function cancelJob() {
   if (!confirm("このジョブをキャンセルしますか？")) return;
   try {
-    const resp = await fetch(`http://152.69.200.74:8080/api/job/${JOB_ID}/cancel`, { method: "POST",  });
+    const resp = await fetch(`https://api.phaino-ai.com/api/job/${JOB_ID}/cancel`, { method: "POST",  });
     if (resp.ok) {
       location.reload();
     } else {
