@@ -598,6 +598,7 @@ let polling = null;
 
 if (["queued", "running"].includes(INITIAL_STATUS)) {
   polling = setInterval(pollLog, 2000);
+  document.getElementById("cancel-btn").style.display = "";
 }
 
 async function pollLog() {
@@ -652,8 +653,11 @@ async function pollLog() {
     // 完了 or エラーならポーリング停止
     if (["done", "error", "cancelled"].includes(data.status)) {
       clearInterval(polling);
-      // ページリロードして結果サマリーを表示
-      setTimeout(() => location.reload(), 1000);
+      polling = null;
+      if (_metricsInterval) { clearInterval(_metricsInterval); _metricsInterval = null; }
+      document.getElementById("cancel-btn").style.display = "none";
+      // サマリー再取得
+      await loadJob();
     }
   } catch(e) {
     console.error("poll error:", e);
