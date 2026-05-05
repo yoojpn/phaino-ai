@@ -159,12 +159,23 @@ class ScanWorker:
             total_funcs    = total_single + total_compound
             self._log(job_id, f"  LLM: 0/{total_funcs} 関数完了 | 脆弱性候補: 0件\n")
 
-            compound_done  = [0]
-            compound_vulns = [0]
+            counter_lock    = asyncio.Lock()
+            single_done     = [0]
+            single_vulns    = [0]
+            compound_done   = [0]
+            compound_vulns  = [0]
+
+            async def _log_progress():
+                done  = single_done[0] + compound_done[0]
+                vulns = single_vulns[0] + compound_vulns[0]
+                self._log(job_id,
+                    f"  LLM: {done}/{total_funcs} 関数完了 | 脆弱性候補: {vulns}件\n")
 
             async def batch_progress(done, total, vulns):
-                self._log(job_id,
-                    f"  LLM: {done + compound_done[0]}/{total_funcs} 関数完了 | 脆弱性候補: {vulns + compound_vulns[0]}件\n")
+                async with counter_lock:
+                    single_done[0]  = done
+                    single_vulns[0] = vulns
+                await _log_progress()
 
             async def run_compound():
                 results = []
@@ -172,12 +183,12 @@ class ScanWorker:
                     from analyzer.llm import build_compound_prompt
                     prompt = build_compound_prompt(group)
                     r = await llm_analyzer._call_llm(prompt, group[0], is_compound=True, compound_group=group)
-                    compound_done[0] += 1
-                    if r and r.label.is_vulnerable:
-                        compound_vulns[0] += 1
-                        results.append(r)
-                    self._log(job_id,
-                        f"  LLM: {compound_done[0]}/{total_funcs} 関数完了 | 脆弱性候補: {compound_vulns[0]}件\n")
+                    async with counter_lock:
+                        compound_done[0] += 1
+                        if r and r.label.is_vulnerable:
+                            compound_vulns[0] += 1
+                            results.append(r)
+                    await _log_progress()
                 return results
 
             single_results, compound_results = await asyncio.gather(

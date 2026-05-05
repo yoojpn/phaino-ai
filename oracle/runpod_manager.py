@@ -258,11 +258,13 @@ class RunPodManager:
             logger.info(f"GPU在庫確認: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
             # 4090に性能・金額が近いGPUを優先するスコアリング
             GPU_PRIORITY = {
-                "NVIDIA A100 80GB PCIe":     1,
-                "NVIDIA A100-SXM4-80GB":     2,
-                "NVIDIA A100 80GB":          3,
-                "NVIDIA L40S":               4,
-                "NVIDIA L40":                5,
+                "NVIDIA L40S":               1,
+                "NVIDIA RTX 6000 Ada Generation": 2,
+                "NVIDIA L40":                3,
+                "NVIDIA GeForce RTX 4090":   4,
+                "NVIDIA A100 80GB PCIe":     5,
+                "NVIDIA A100-SXM4-80GB":     6,
+                "NVIDIA A100 80GB":          7,
             }
             filtered = [g for g in available if g["id"] in GPU_PRIORITY]
             filtered.sort(key=lambda x: (
@@ -274,6 +276,9 @@ class RunPodManager:
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
             return [
+                "NVIDIA L40S",
+                "NVIDIA RTX 6000 Ada Generation",
+                "NVIDIA L40",
                 os.getenv("RUNPOD_GPU_TYPE", "NVIDIA GeForce RTX 4090"),
                 "NVIDIA RTX A5000",
                 "NVIDIA GeForce RTX 3090",
@@ -296,7 +301,7 @@ class RunPodManager:
                 "--model", "Qwen/Qwen3.6-27B-FP8",
                 "--quantization", "fp8",
                 "--max-model-len", "16384",
-                "--gpu-memory-utilization", "0.75",
+                "--gpu-memory-utilization", "0.90",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
                 "--tool-call-parser", "qwen3_coder",
@@ -318,6 +323,8 @@ class RunPodManager:
                 "VLLM_TRUST_REMOTE_CODE": "true",
                 "VLLM_ENABLE_PREFIX_CACHING": "true",
                 "VLLM_DTYPE": "float16",
+                "HF_HUB_ENABLE_HF_TRANSFER": "1",
+                "HF_HOME": "/runpod-volume/hf_cache",
             },
         }
 

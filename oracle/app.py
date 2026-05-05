@@ -80,7 +80,25 @@ async def lifespan(app: FastAPI):
 # ===========================
 # FastAPI アプリ
 # ===========================
+import base64
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, username: str, password: str):
+        super().__init__(app)
+        self.credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+
+    async def dispatch(self, request, call_next):
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Basic ") and auth[6:] == self.credentials:
+            return await call_next(request)
+        return Response(
+            content="Unauthorized",
+            status_code=401,
+            headers={"WWW-Authenticate": "Basic realm=\"phaino-ai\""}
+        )
 
 app = FastAPI(
     title="phaino_ai",
@@ -91,7 +109,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://phaino-ai.com", "https://phaino-ai.pages.dev"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

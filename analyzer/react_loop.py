@@ -413,14 +413,16 @@ class ReActLoop:
                     timeout=args.get("timeout", 30),
                 )
             elif tool_name == "run_gdb":
-                return await self.docker.run_gdb(
-                    code=code,
-                    payload=args.get("payload", ""),
+                return await self._run_with_llm_fix(
+                    "run_gdb", code, language,
+                    lambda c: self.docker.run_gdb(code=c, payload=args.get("payload", "")),
+                    sample,
                 )
             elif tool_name == "run_asan":
-                return await self.docker.run_asan(
-                    code=code, language=language,
-                    payload=args.get("payload", ""),
+                return await self._run_with_llm_fix(
+                    "run_asan", code, language,
+                    lambda c: self.docker.run_asan(code=c, language=language, payload=args.get("payload", "")),
+                    sample,
                 )
             elif tool_name == "modify_payload":
                 return f"Payload updated to: {args.get('new_payload', '')} (reason: {args.get('reason', '')})"
@@ -429,6 +431,74 @@ class ReActLoop:
 
         except Exception as e:
             return f"Tool execution error ({tool_name}): {e}"
+
+    # ===========================
+    # LLMコード修正＋再試行
+    # ===========================
+
+    async def _run_with_llm_fix(
+        self,
+        tool_name: str,
+        code: str,
+        language: str,
+        executor,
+        sample: VulnSample,
+        max_retries: int = 2,
+    ) -> str:
+        """ツール実行が失敗したらLLMにコードを修正させて再試行する"""
+        current_code = code
+        last_result = ""
+
+        for attempt in range(max_retries + 1):
+            result = await executor(current_code)
+            last_result = result
+
+            # 成功判定: エラーなし かつ 空でない
+            error_keywords = ["error", "Error", "fatal", "No such file", "Traceback", "cc1:"]
+            is_error = any(kw in result for kw in error_keywords) or result.strip() == ""
+
+            if not is_error:
+                return result
+
+            if attempt >= max_retries:
+                break
+
+            print(f"  [!] {tool_name} 失敗 (attempt {attempt+1}), LLMに修正依頼...")
+
+            # LLMにコード修正を依頼
+            try:
+                fix_resp = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": (
+                            "You are a security exploit code fixer. "
+                            "Fix the given code so it compiles and runs correctly in a Linux Docker environment. "
+                            "Return ONLY the fixed code, no explanation, no markdown fences."
+                        )},
+                        {"role": "user", "content": (
+                            f"Tool: {tool_name}\n"
+                            f"Language: {language}\n"
+                            f"Error output:\n{result[:500]}\n\n"
+                            f"Original code:\n{current_code}\n\n"
+                            f"Fix the code to eliminate the error and make it runnable."
+                        )},
+                    ],
+                    max_tokens=1024,
+                    temperature=0.2,
+                    extra_body={"chat_template_kwargs": {"thinking": False}},
+                )
+                fixed_code = fix_resp.choices[0].message.content.strip()
+                # マークダウンフェンス除去
+                if fixed_code.startswith("```"):
+                    lines = fixed_code.split("\n")
+                    fixed_code = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+                current_code = fixed_code
+                print(f"  [→] コード修正完了 ({len(fixed_code)} chars)")
+            except Exception as e:
+                print(f"  [!] LLM修正失敗: {e}")
+                break
+
+        return last_result
 
     # ===========================
     # ヘルパー

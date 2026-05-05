@@ -255,20 +255,22 @@ quit
 
         try:
             loop   = asyncio.get_event_loop()
+            docker_args = [
+                "docker", "run", "--rm",
+                "--network", "none",
+                "--memory", "256m",
+                "--cpus", "0.5",
+                "--read-only",
+                "--tmpfs", "/tmp",
+                "--tmpfs", "/sandbox",
+                "-v", f"{self.sandbox_dir}:{self.sandbox_dir}:ro",
+                "vulnscan-attacker:latest",
+                "bash", "-c", cmd,
+            ]
             result = await loop.run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    [
-                        "docker", "run", "--rm",
-                        "--network", "none",
-                        "--memory", "256m",
-                        "--cpus", "0.5",
-                        "--read-only",
-                        "--tmpfs", "/tmp",
-                        "--tmpfs", "/sandbox",
-                        "vulnscan-attacker:latest",
-                        "bash", "-c", cmd,
-                    ],
+                    docker_args,
                     capture_output=True,
                     text=True,
                     timeout=30,
