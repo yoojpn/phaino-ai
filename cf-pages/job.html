@@ -566,7 +566,7 @@ async function loadJob() {
     document.getElementById("s-reported").textContent = s.reported ?? "-";
     document.getElementById("s-confirmed").textContent = s.confirmed ?? "-";
     document.getElementById("s-practical").textContent = s.practical ?? "-";
-    document.getElementById("summary-box").style.display = "";
+    document.getElementById("summary-card").style.display = "";
   }
   if (job.log) {
     // LLM進捗行を除去してログ表示
