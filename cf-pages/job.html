@@ -448,66 +448,35 @@ a:hover { color: var(--accent-hover); }
   <section class="card">
     <div class="job-header">
       <div>
-        <h2 class="target-title" title="{{ job.target_display }}">{{ job.target_display }}</h2>
+        <h2 class="target-title" id="target-title">読み込み中...</h2>
         <div class="job-meta">
-          <span class="badge badge-type">{{ job.target_type }}</span>
-          <span class="badge badge-{{ job.status }}" id="status-badge">{{ job.status }}</span>
-          <span class="time-cell">{{ job.created_at[:16].replace("T"," ") }} UTC</span>
+          <span class="badge badge-type" id="target-type"></span>
+          <span class="badge" id="status-badge"></span>
+          <span class="time-cell" id="created-at"></span>
         </div>
       </div>
       <div class="job-actions">
-        {% if job.status in ("queued", "running") %}
-        <button class="btn-danger" id="cancel-btn" onclick="cancelJob()">キャンセル</button>
-        {% endif %}
-        {% if job.status == "done" %}
-        <a href="https://api.phaino-ai.com/api/job/{{ job.id }}/report" class="btn-primary" download>📄 レポートDL</a>
-        {% endif %}
+        <button class="btn-danger" id="cancel-btn" onclick="cancelJob()" style="display:none">キャンセル</button>
+        <a href="#" id="report-link" class="btn-primary" download style="display:none">📄 レポートDL</a>
       </div>
     </div>
 
     <!-- オプション -->
-    {% if job.options %}
-    <div class="options-row">
-      <span>min_exploitability: <strong>{{ job.options.min_exploitability }}</strong></span>
-      {% if job.options.no_codeql %}<span class="badge-disabled">CodeQL無効</span>{% endif %}
-      {% if job.options.no_docker %}<span class="badge-disabled">Docker無効</span>{% endif %}
-      {% if job.options.no_react %}<span class="badge-disabled">ReAct無効</span>{% endif %}
-    </div>
-    {% endif %}
+    <div class="options-row" id="options-box"></div>
   </section>
 
   <!-- 結果サマリー -->
-  {% if job.result_summary %}
-  <section class="card" id="summary-card">
+  <section class="card" id="summary-card" style="display:none">
     <h3>スキャン結果</h3>
     <div class="summary-grid">
-      <div class="summary-item">
-        <div class="summary-num">{{ job.result_summary.files }}</div>
-        <div class="summary-label">ファイル</div>
-      </div>
-      <div class="summary-item">
-        <div class="summary-num">{{ job.result_summary.functions }}</div>
-        <div class="summary-label">解析関数</div>
-      </div>
-      <div class="summary-item">
-        <div class="summary-num">{{ job.result_summary.total_vulns }}</div>
-        <div class="summary-label">脆弱性候補</div>
-      </div>
-      <div class="summary-item summary-reported">
-        <div class="summary-num">{{ job.result_summary.reported }}</div>
-        <div class="summary-label">報告対象</div>
-      </div>
-      <div class="summary-item summary-confirmed">
-        <div class="summary-num">{{ job.result_summary.confirmed }}</div>
-        <div class="summary-label">✅ confirmed</div>
-      </div>
-      <div class="summary-item summary-practical">
-        <div class="summary-num">{{ job.result_summary.practical }}</div>
-        <div class="summary-label">⚠️ practical</div>
-      </div>
+      <div class="summary-item"><div class="summary-num" id="s-files">-</div><div class="summary-label">ファイル</div></div>
+      <div class="summary-item"><div class="summary-num" id="s-functions">-</div><div class="summary-label">解析関数</div></div>
+      <div class="summary-item"><div class="summary-num" id="s-total">-</div><div class="summary-label">脆弱性候補</div></div>
+      <div class="summary-item summary-reported"><div class="summary-num" id="s-reported">-</div><div class="summary-label">報告対象</div></div>
+      <div class="summary-item summary-confirmed"><div class="summary-num" id="s-confirmed">-</div><div class="summary-label">✅ confirmed</div></div>
+      <div class="summary-item summary-practical"><div class="summary-num" id="s-practical">-</div><div class="summary-label">⚠️ practical</div></div>
     </div>
   </section>
-  {% endif %}
 
   <!-- ライブログ -->
   <section class="card">
@@ -517,13 +486,56 @@ a:hover { color: var(--accent-hover); }
         <input type="checkbox" id="autoscroll" checked> 自動スクロール
       </label>
     </div>
-    <pre class="log-box" id="log-box">{{ job.log or "（ログなし）" }}</pre>
+    <pre class="log-box" id="log-box">（ログなし）</pre>
   </section>
 </main>
 
 <script>
-const JOB_ID = "{{ job.id }}";
-const INITIAL_STATUS = "{{ job.status }}";
+const params = new URLSearchParams(window.location.search);
+const JOB_ID = params.get("job_id") || window.location.pathname.split("/").pop();
+let INITIAL_STATUS = "running";
+
+async function loadJob() {
+  const resp = await fetch(`https://api.phaino-ai.com/api/job/${JOB_ID}`);
+  if (!resp.ok) return;
+  const job = await resp.json();
+  INITIAL_STATUS = job.status;
+  document.getElementById("target-title").textContent = job.target_display || "";
+  document.getElementById("target-title").title = job.target_display || "";
+  document.getElementById("target-type").textContent = job.target_type || "";
+  const sb = document.getElementById("status-badge");
+  sb.textContent = job.status;
+  sb.className = `badge badge-${job.status}`;
+  document.getElementById("created-at").textContent = (job.created_at || "").slice(0,16).replace("T"," ") + " UTC";
+  const rl = document.getElementById("report-link");
+  if (job.status === "done") {
+    rl.href = `https://api.phaino-ai.com/api/job/${job.id}/report`;
+    rl.style.display = "";
+  }
+  if (job.options) {
+    let html = `<span>min_exploitability: <strong>${job.options.min_exploitability}</strong></span>`;
+    if (job.options.no_codeql) html += `<span class="badge-disabled">CodeQL無効</span>`;
+    if (job.options.no_docker) html += `<span class="badge-disabled">Docker無効</span>`;
+    if (job.options.no_react) html += `<span class="badge-disabled">ReAct無効</span>`;
+    document.getElementById("options-box").innerHTML = html;
+  }
+  if (job.result_summary) {
+    const s = job.result_summary;
+    document.getElementById("s-files").textContent = s.files ?? "-";
+    document.getElementById("s-functions").textContent = s.functions ?? "-";
+    document.getElementById("s-total").textContent = s.total_vulns ?? "-";
+    document.getElementById("s-reported").textContent = s.reported ?? "-";
+    document.getElementById("s-confirmed").textContent = s.confirmed ?? "-";
+    document.getElementById("s-practical").textContent = s.practical ?? "-";
+    document.getElementById("summary-box").style.display = "";
+  }
+  if (job.log) {
+    const box = document.getElementById("log-box");
+    box.textContent = job.log;
+    logOffset = job.log.length;
+  }
+}
+loadJob();
 
 // ===========================
 // ライブポーリング（running/queuedのみ）
