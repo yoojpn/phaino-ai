@@ -1,1 +1,1 @@
-/api/* http://152.69.200.74:8080/api/:splat 200
+/job/* /job.html 200
