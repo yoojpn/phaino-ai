@@ -486,6 +486,15 @@ a:hover { color: var(--accent-hover); }
         <input type="checkbox" id="autoscroll" checked> 自動スクロール
       </label>
     </div>
+    <div id="progress-box" style="display:none; margin-bottom:12px;">
+      <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+        <span id="progress-label" style="font-size:13px; color:var(--text-muted);">LLM解析中...</span>
+        <span id="progress-pct" style="font-size:13px; color:var(--accent);">0%</span>
+      </div>
+      <div style="background:var(--surface2); border-radius:4px; height:8px; overflow:hidden;">
+        <div id="progress-bar" style="height:100%; background:var(--accent); width:0%; transition:width 0.3s;"></div>
+      </div>
+    </div>
     <pre class="log-box" id="log-box">（ログなし）</pre>
   </section>
 </main>
@@ -556,6 +565,19 @@ async function pollLog() {
       const box = document.getElementById("log-box");
       box.textContent += data.log;
       logOffset = data.offset;
+
+      // プログレスバー更新
+      const allLog = box.textContent;
+      const matches = [...allLog.matchAll(/LLM: (\d+)\/(\d+) 関数完了 \| 脆弱性候補: (\d+)件/g)];
+      if (matches.length > 0) {
+        const last = matches[matches.length - 1];
+        const done = parseInt(last[1]), total = parseInt(last[2]), vulns = parseInt(last[3]);
+        const pct = total > 0 ? Math.round(done / total * 100) : 0;
+        document.getElementById("progress-box").style.display = "";
+        document.getElementById("progress-bar").style.width = pct + "%";
+        document.getElementById("progress-pct").textContent = pct + "%";
+        document.getElementById("progress-label").textContent = `LLM: ${done}/${total} 関数完了 | 脆弱性候補: ${vulns}件`;
+      }
       if (document.getElementById("autoscroll").checked) {
         box.scrollTop = box.scrollHeight;
       }
