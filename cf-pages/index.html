@@ -579,31 +579,8 @@ a:hover { color: var(--accent-hover); }
           <th></th>
         </tr>
       </thead>
-      <tbody>
-        {% for job in jobs %}
-        <tr>
-          <td class="target-cell" title="{{ job.target_display }}">{{ job.target_display | truncate(40) }}</td>
-          <td><span class="badge badge-type">{{ job.target_type }}</span></td>
-          <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
-          <td>
-            {% if job.result_summary %}
-              <span class="result-mini">
-                ✅{{ job.result_summary.confirmed }} 
-                ⚠️{{ job.result_summary.practical }}
-                / {{ job.result_summary.reported }}件報告
-              </span>
-            {% else %}
-              —
-            {% endif %}
-          </td>
-          <td class="time-cell">{{ job.created_at[:16].replace("T"," ") }}</td>
-          <td>
-            <a href="https://phaino-ai.com/job/{{ job.id }}" class="btn-small">詳細</a>
-          </td>
-        </tr>
-        {% else %}
-        <tr><td colspan="6" class="empty">ジョブがありません</td></tr>
-        {% endfor %}
+      <tbody id="job-tbody">
+        <tr><td colspan="6" class="empty">読み込み中...</td></tr>
       </tbody>
     </table>
   </section>
@@ -689,6 +666,40 @@ async function submitForm(formId, endpoint, isMultipart) {
 submitForm("form-github", "https://phaino-ai.com/api/scan/github", false);
 submitForm("form-zip",    "https://phaino-ai.com/api/scan/zip",    true);
 submitForm("form-web",    "https://phaino-ai.com/api/scan/web",    false);
+submitForm("form-multi",  "https://phaino-ai.com/api/scan/multi",  false);
+ 
+// ===========================
+// ジョブ履歴
+// ===========================
+async function loadJobs() {
+  try {
+    const resp = await fetch("https://phaino-ai.com/api/jobs", { credentials: "include" });
+    if (!resp.ok) return;
+    const jobs = await resp.json();
+    const tbody = document.getElementById("job-tbody");
+    if (!jobs || jobs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">ジョブがありません</td></tr>';
+      return;
+    }
+    tbody.innerHTML = jobs.map(job => {
+      const summary = job.result_summary
+        ? `<span class="result-mini">✅${job.result_summary.confirmed} ⚠️${job.result_summary.practical} / ${job.result_summary.reported}件報告</span>`
+        : "—";
+      const time = (job.created_at || "").slice(0,16).replace("T"," ");
+      const disp = (job.target_display || "").slice(0,40);
+      return `<tr>
+        <td class="target-cell" title="${job.target_display}">${disp}</td>
+        <td><span class="badge badge-type">${job.target_type||""}</span></td>
+        <td><span class="badge badge-${job.status}">${job.status||""}</span></td>
+        <td>${summary}</td>
+        <td class="time-cell">${time}</td>
+        <td><a href="https://phaino-ai.com/job/${job.id}" class="btn-small">詳細</a></td>
+      </tr>`;
+    }).join("");
+  } catch(e) {}
+}
+loadJobs();
+setInterval(loadJobs, 10000);
 
 // ===========================
 // RunPodステータス
