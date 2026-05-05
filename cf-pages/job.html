@@ -569,28 +569,20 @@ async function loadJob() {
     document.getElementById("summary-box").style.display = "";
   }
   if (job.log) {
+    // LLM進捗行を除去してログ表示
+    const filtered = job.log.split("\n")
+      .filter(l => !l.match(/LLM: \d+\/\d+ 関数完了/))
+      .join("\n");
     const box = document.getElementById("log-box");
-    box.textContent = job.log;
+    box.textContent = filtered;
     logOffset = job.log.length;
 
-    // vLLM URLをログから抽出
+    // vLLM URLとtotalをログから抽出
     const urlMatch = job.log.match(/vLLM URL: (https?:\/\/[^\s]+\/v1)/);
     if (urlMatch) {
       window._vllmMetricsUrl = urlMatch[1].replace("/v1", "") + "/metrics";
-      // totalをログから抽出
       const totalMatch = job.log.match(/LLM: \d+\/(\d+)/);
       if (totalMatch) window._vllmTotal = parseInt(totalMatch[1]);
-    }
-
-    const matches = [...job.log.matchAll(/LLM: (\d+)\/(\d+) 関数完了 \| 脆弱性候補: (\d+)件/g)];
-    if (matches.length > 0) {
-      const last = matches.reduce((a, b) => parseInt(a[1]) > parseInt(b[1]) ? a : b);
-      const done = parseInt(last[1]), total = parseInt(last[2]), vulns = parseInt(last[3]);
-      const pct = total > 0 ? Math.round(done / total * 100) : 0;
-      document.getElementById("progress-box").style.display = "";
-      document.getElementById("progress-bar").style.width = pct + "%";
-      document.getElementById("progress-pct").textContent = pct + "%";
-      document.getElementById("progress-label").textContent = `LLM: ${done}/${total} 関数完了 | 脆弱性候補: ${vulns}件`;
     }
   }
 }
@@ -615,7 +607,11 @@ async function pollLog() {
 
     if (data.log) {
       const box = document.getElementById("log-box");
-      box.textContent += data.log;
+      // LLM進捗行を除去して追記
+      const filtered = data.log.split("\n")
+        .filter(l => !l.match(/LLM: \d+\/\d+ 関数完了/))
+        .join("\n");
+      box.textContent += filtered;
       logOffset = data.offset;
 
       // vLLM URLが新しいログに含まれてたら抽出
@@ -623,7 +619,7 @@ async function pollLog() {
         const urlMatch = data.log.match(/vLLM URL: (https?:\/\/[^\s]+\/v1)/);
         if (urlMatch) {
           window._vllmMetricsUrl = urlMatch[1].replace("/v1", "") + "/metrics";
-          const totalMatch = box.textContent.match(/LLM: \d+\/(\d+)/);
+          const totalMatch = data.log.match(/LLM: \d+\/(\d+)/);
           if (totalMatch) window._vllmTotal = parseInt(totalMatch[1]);
           startMetricsPolling();
         }
