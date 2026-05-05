@@ -647,7 +647,7 @@ async function submitForm(formId, endpoint, isMultipart) {
         fd.set(key, form.querySelector(`[name=${key}]`).checked ? "true" : "false");
       });
 
-      const resp = await fetch(endpoint, { method: "POST", body: fd,  });
+      const resp = await fetch(endpoint, { method: "POST", body: fd });
       if (!resp.ok) {
         const err = await resp.json();
         alert("エラー: " + (err.detail || resp.statusText));
@@ -663,17 +663,17 @@ async function submitForm(formId, endpoint, isMultipart) {
   });
 }
 
-submitForm("form-github", "https://phaino-ai.com/api/scan/github", false);
-submitForm("form-zip",    "https://phaino-ai.com/api/scan/zip",    true);
-submitForm("form-web",    "https://phaino-ai.com/api/scan/web",    false);
-submitForm("form-multi",  "https://phaino-ai.com/api/scan/multi",  false);
+submitForm("form-github", "http://152.69.200.74:8080/api/scan/github", false);
+submitForm("form-zip",    "http://152.69.200.74:8080/api/scan/zip",    true);
+submitForm("form-web",    "http://152.69.200.74:8080/api/scan/web",    false);
+submitForm("form-multi",  "http://152.69.200.74:8080/api/scan/multi",  false);
  
 // ===========================
 // ジョブ履歴
 // ===========================
 async function loadJobs() {
   try {
-    const resp = await fetch("https://phaino-ai.com/api/jobs", {  });
+    const resp = await fetch("http://152.69.200.74:8080/api/jobs", { credentials: "include" });
     if (!resp.ok) return;
     const jobs = await resp.json();
     const tbody = document.getElementById("job-tbody");
@@ -706,7 +706,7 @@ setInterval(loadJobs, 10000);
 // ===========================
 async function updateRunpodBadge() {
   try {
-    const resp = await fetch("https://phaino-ai.com/api/runpod/status", {  });
+    const resp = await fetch("http://152.69.200.74:8080/api/runpod/status", { credentials: "include" });
     const data = await resp.json();
     const badge = document.getElementById("runpod-badge");
     if (!data.configured) {
