@@ -455,6 +455,7 @@ a:hover { color: var(--accent-hover); }
       <button class="tab active" data-tab="github">GitHub URL</button>
       <button class="tab" data-tab="zip">ZIP アップロード</button>
       <button class="tab" data-tab="web">Web URL</button>
+      <button class="tab" data-tab="multi">複数ターゲット</button>
     </div>
 
     <!-- GitHub -->
@@ -530,6 +531,33 @@ a:hover { color: var(--accent-hover); }
       </form>
     </div>
   </section>
+
+    <!-- 複数ターゲット -->
+    <div class="tab-content" id="tab-multi">
+      <form id="form-multi" enctype="multipart/form-data">
+        <div class="form-group">
+          <label>GitHub URL（複数可、1行1URL）</label>
+          <textarea name="repo_urls" rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;padding:10px 12px;outline:none;resize:vertical;" placeholder="https://github.com/owner/repo1&#10;https://github.com/owner/repo2"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Web URL（複数可、1行1URL）</label>
+          <textarea name="site_urls" rows="2" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;padding:10px 12px;outline:none;resize:vertical;" placeholder="https://example.com"></textarea>
+        </div>
+        <div class="form-options">
+          <label>最低Exploitability:
+            <select name="min_exploitability">
+              <option value="practical" selected>practical（推奨）</option>
+              <option value="confirmed">confirmed のみ</option>
+              <option value="theoretical">theoretical 以上（全件）</option>
+            </select>
+          </label>
+          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
+          <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label><input type="checkbox" name="no_react"> ReActループ無効</label>
+        </div>
+        <button type="submit" class="btn-primary">スキャン開始</button>
+      </form>
+    </div>
 
   <!-- 送信中オーバーレイ -->
   <div class="submitting-overlay" id="submitting-overlay" style="display:none">
