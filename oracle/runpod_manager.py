@@ -258,12 +258,11 @@ class RunPodManager:
             logger.info(f"GPU在庫確認: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
             # 4090に性能・金額が近いGPUを優先するスコアリング
             GPU_PRIORITY = {
-                "NVIDIA L40S":               1,
-                "NVIDIA RTX 6000 Ada Generation": 2,
-                "NVIDIA L40":                3,
-                "NVIDIA A100 80GB PCIe":     4,
-                "NVIDIA A100-SXM4-80GB":     5,
-                "NVIDIA A100 80GB":          6,
+                "NVIDIA A100 80GB PCIe":     1,
+                "NVIDIA A100-SXM4-80GB":     2,
+                "NVIDIA A100 80GB":          3,
+                "NVIDIA RTX 6000 Ada Generation": 4,
+                "NVIDIA L40":                5,
             }
             filtered = [g for g in available if g["id"] in GPU_PRIORITY]
             filtered.sort(key=lambda x: (
