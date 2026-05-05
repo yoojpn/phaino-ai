@@ -157,6 +157,7 @@ async def scan_multi(
     min_exploitability: str = Form("practical"),
     no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
+    max_functions: int = Form(5000),
     no_react: bool = Form(False),
 ):
     """複数ターゲット（リポ/ZIP/Web）を1ジョブでスキャン"""
@@ -195,6 +196,7 @@ async def scan_multi(
         min_exploitability=min_exploitability,
         no_codeql=no_codeql,
         no_docker=no_docker,
+        max_functions=max_functions,
         no_react=no_react,
     )
     return JSONResponse({"job_id": job_id, "status": "queued", "targets": len(targets)})
@@ -208,6 +210,7 @@ async def scan_github(
     min_exploitability: str = Form("practical"),
     no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
+    max_functions: int = Form(5000),
     no_react: bool = Form(False),
 ):
     """GitHubリポジトリURLでスキャン"""
@@ -222,6 +225,7 @@ async def scan_github(
         min_exploitability=min_exploitability,
         no_codeql=no_codeql,
         no_docker=no_docker,
+        max_functions=max_functions,
         no_react=no_react,
     )
     return JSONResponse({"job_id": job_id, "status": "queued"})
@@ -234,6 +238,7 @@ async def scan_zip(
     min_exploitability: str = Form("practical"),
     no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
+    max_functions: int = Form(5000),
     no_react: bool = Form(False),
 ):
     """ZIPファイルでスキャン"""
@@ -258,6 +263,7 @@ async def scan_zip(
         min_exploitability=min_exploitability,
         no_codeql=no_codeql,
         no_docker=no_docker,
+        max_functions=max_functions,
         no_react=no_react,
     )
     return JSONResponse({"job_id": job_id, "status": "queued"})
@@ -270,6 +276,7 @@ async def scan_web(
     min_exploitability: str = Form("practical"),
     no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
+    max_functions: int = Form(5000),
     no_react: bool = Form(False),
 ):
     """WebサイトURLでスキャン（JS/HTML/APIクロール）"""
@@ -284,6 +291,7 @@ async def scan_web(
         min_exploitability=min_exploitability,
         no_codeql=no_codeql,
         no_docker=no_docker,
+        max_functions=max_functions,
         no_react=no_react,
     )
     return JSONResponse({"job_id": job_id, "status": "queued"})
@@ -382,6 +390,7 @@ def _create_job(
     min_exploitability: str = "practical",
     no_codeql: bool = False,
     no_docker: bool = False,
+    max_functions: int = 5000,
     no_react: bool = False,
     target_display: Optional[str] = None,
 ) -> str:
@@ -395,6 +404,7 @@ def _create_job(
             "min_exploitability": min_exploitability,
             "no_codeql": no_codeql,
             "no_docker": no_docker,
+            "max_functions": max_functions,
             "no_react": no_react,
         },
     )

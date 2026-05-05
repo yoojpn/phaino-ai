@@ -142,7 +142,7 @@ class InputLoader:
 
         files = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-            for result in ex.map(fetch_file, targets[:200]):
+            for result in ex.map(fetch_file, targets):
                 if result:
                     files.append(result)
 

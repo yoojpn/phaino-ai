@@ -61,6 +61,17 @@ EXCLUDE_DIRS = {
     "target", "out", ".idea", ".vscode",
     "plugins", "bower_components", "third_party",
     "jquery", "bootstrap", "angular",
+    # テスト系
+    "test", "tests", "testing", "unittest", "testdata",
+    "fixtures", "mocks", "mock", "spec", "specs",
+    "benchmarks", "benchmark", "perf",
+    # 言語バインディング・自動生成
+    "python", "ruby", "java", "csharp", "php", "objc",
+    "javascript", "kotlin", "swift", "lua", "perl",
+    "generated", "gen", "auto_generated", "pb",
+    # ドキュメント・サンプル
+    "docs", "doc", "examples", "example", "samples", "demo",
+    "tutorial", "conformance",
 }
 EXCLUDE_FILE_PATTERNS = [
     r"\.min\.[jt]s$",

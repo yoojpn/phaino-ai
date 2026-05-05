@@ -261,10 +261,9 @@ class RunPodManager:
                 "NVIDIA L40S":               1,
                 "NVIDIA RTX 6000 Ada Generation": 2,
                 "NVIDIA L40":                3,
-                "NVIDIA GeForce RTX 4090":   4,
-                "NVIDIA A100 80GB PCIe":     5,
-                "NVIDIA A100-SXM4-80GB":     6,
-                "NVIDIA A100 80GB":          7,
+                "NVIDIA A100 80GB PCIe":     4,
+                "NVIDIA A100-SXM4-80GB":     5,
+                "NVIDIA A100 80GB":          6,
             }
             filtered = [g for g in available if g["id"] in GPU_PRIORITY]
             filtered.sort(key=lambda x: (

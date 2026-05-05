@@ -475,6 +475,7 @@ a:hover { color: var(--accent-hover); }
           </label>
           <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
         </div>
         <button type="submit" class="btn-primary">スキャン開始</button>
@@ -502,6 +503,7 @@ a:hover { color: var(--accent-hover); }
           </label>
           <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
         </div>
         <button type="submit" class="btn-primary">スキャン開始</button>
@@ -525,6 +527,7 @@ a:hover { color: var(--accent-hover); }
           </label>
           <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
         </div>
         <button type="submit" class="btn-primary">スキャン開始</button>
@@ -553,6 +556,7 @@ a:hover { color: var(--accent-hover); }
           </label>
           <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
+          <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
         </div>
         <button type="submit" class="btn-primary">スキャン開始</button>
@@ -646,6 +650,8 @@ async function submitForm(formId, endpoint, isMultipart) {
       ["no_codeql","no_docker","no_react"].forEach(key => {
         fd.set(key, form.querySelector(`[name=${key}]`).checked ? "true" : "false");
       });
+      const maxFn = form.querySelector('[name=max_functions]');
+      if (maxFn) fd.set("max_functions", maxFn.value || "0");
 
       const resp = await fetch(endpoint, { method: "POST", body: fd });
       if (!resp.ok) {
