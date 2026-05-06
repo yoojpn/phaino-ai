@@ -326,15 +326,19 @@ class RunPodManager:
             },
         }
 
-        attempts = [
-            ("Spot",      {**base_payload, "interruptible": True}),
-            ("On-demand", {**base_payload, "interruptible": False}),
-        ]
+        # gpuTypeIds(配列)非対応のAPIのためgpuTypeIdを1つずつ試す
+        attempts = []
+        for gpu_id in gpu_candidates[:8]:
+            payload_base = {**base_payload, "gpuTypeId": gpu_id}
+            payload_base.pop("gpuTypeIds", None)
+            attempts.append(("Spot",      {**payload_base, "interruptible": True}))
+            attempts.append(("On-demand", {**payload_base, "interruptible": False}))
 
         last_error = None
         for label, payload in attempts:
             try:
-                logger.info(f"Pod作成試行: {label} / GPUs: {gpu_candidates[:4]}...")
+                gpu_id = payload.get("gpuTypeId", "?")
+                logger.info(f"Pod作成試行: {label} / GPU: {gpu_id}")
                 logger.info(f"Pod作成ペイロード imageName={payload.get('imageName')} dockerStartCmd={payload.get('dockerStartCmd')}")
                 async with httpx.AsyncClient() as client:
                     resp = await client.post(
@@ -355,7 +359,7 @@ class RunPodManager:
                         return pod_id
                     else:
                         err_msg = data.get("error") if isinstance(data, dict) else str(data)
-                        logger.warning(f"{label} 失敗: {err_msg}")
+                        logger.warning(f"{label} GPU={gpu_id} 失敗: {err_msg}")
                         last_error = err_msg
             except Exception as e:
                 logger.warning(f"{label} 例外: {e}")
