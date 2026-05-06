@@ -272,10 +272,10 @@ class RunPodManager:
             filtered = available
             filtered.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
             logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
-            return [g["id"] for g in filtered]
+            return ["NVIDIA A40", "NVIDIA RTX A6000", "NVIDIA L40S"] for g in filtered]
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
-            return ["NVIDIA A40", "NVIDIA L40", "NVIDIA RTX A6000"]
+            return ["NVIDIA A40", "NVIDIA RTX A6000", "NVIDIA L40S"]
 
     async def _create_pod(self) -> str:
         """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
@@ -285,14 +285,16 @@ class RunPodManager:
             "name": RUNPOD_POD_NAME,
             "imageName": POD_IMAGE,
             "gpuTypeIds": [g for g in gpu_candidates if g in VALID_GPU_IDS][:8],
-            "gpuCount": 1,
+            "gpuCount": 2,
             "containerDiskInGb": int(os.getenv("RUNPOD_DISK_SIZE", "100")),
             "ports": [f"{VLLM_PORT}/http"],
             "dockerStartCmd": [
                 "--model", "Qwen/Qwen3.6-27B-FP8",
                 "--quantization", "fp8",
-                "--max-model-len", "8192",
-                "--gpu-memory-utilization", "0.60",
+                "--max-model-len", "16384",
+                "--gpu-memory-utilization", "0.90",
+                "--tensor-parallel-size", "2",
+                "--worker-use-ray", "false",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
                 "--tool-call-parser", "qwen3_coder",
