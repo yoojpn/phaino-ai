@@ -254,7 +254,6 @@ class RunPodManager:
                     })
 
             # High優先、同じstockなら安い順
-            available.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
             logger.info(f"GPU在庫確認: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
             # 4090に性能・金額が近いGPUを優先するスコアリング
             GPU_PRIORITY = {
@@ -266,9 +265,6 @@ class RunPodManager:
             }
             filtered = available
             filtered.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
-                0 if x["stock"] == "High" else 1,
-                GPU_PRIORITY.get(x["id"], 99)
-            ))
             logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
             return [g["id"] for g in filtered]
         except Exception as e:
