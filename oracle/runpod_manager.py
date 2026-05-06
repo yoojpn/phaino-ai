@@ -284,12 +284,15 @@ class RunPodManager:
     async def _create_pod(self) -> str:
         """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
         gpu_candidates = await self._get_available_gpus()
+        selected_gpus = [g for g in gpu_candidates if g in VALID_GPU_IDS][:8]
+        is_a40 = any('A40' in g for g in selected_gpus[:1])
+        gpu_count = 2 if is_a40 else 1
 
         base_payload = {
             "name": RUNPOD_POD_NAME,
             "imageName": POD_IMAGE,
-            "gpuTypeIds": [g for g in gpu_candidates if g in VALID_GPU_IDS][:8],
-            "gpuCount": 2,
+            "gpuTypeIds": selected_gpus,
+            "gpuCount": gpu_count,
             "containerDiskInGb": int(os.getenv("RUNPOD_DISK_SIZE", "100")),
             "ports": [f"{VLLM_PORT}/http"],
             "dockerStartCmd": [
@@ -301,7 +304,7 @@ class RunPodManager:
                 "--trust-remote-code",
                 "--tool-call-parser", "hermes",
                 "--enable-auto-tool-choice",
-                "--tensor-parallel-size", "2",
+                *( ["--tensor-parallel-size", "2"] if is_a40 else [] ),
                 "--port", "8000"
             ],
             "allowedCudaVersions": ["12.8", "12.9"],
