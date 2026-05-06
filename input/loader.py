@@ -69,9 +69,10 @@ class InputLoader:
             files = self._load_github_api(repo, branch=branch, subdir=subdir)
             if files:
                 return files
-        match = re.search(r"github\.com/([^/]+/[^/]+)", url)
+            return self._load_github_clone_sparse(repo, branch, subdir)
+        match = re.search(r"github\.com/([^/]+/[^/]+?)(?:\.git)?(?:/|$)", url)
         if match:
-            repo  = match.group(1).rstrip(".git")
+            repo  = match.group(1)
             files = self._load_github_api(repo)
             if files:
                 return files
