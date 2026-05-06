@@ -229,6 +229,7 @@ class RunPodManager:
                 lowestPrice(input: {gpuCount: 1, minMemoryInGb: 20}) {
                     stockStatus
                     uninterruptablePrice
+                    minPrice
                 }
             }
         }
@@ -248,9 +249,9 @@ class RunPodManager:
             for g in gpu_types:
                 lp = g.get("lowestPrice") or {}
                 stock = lp.get("stockStatus", "")
-                price = lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999
+                price = lp.get("uninterruptablePrice") or 9999
                 vram = g.get("memoryInGb", 0)
-                if stock in ("High", "Medium") and vram >= 45 and (lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999) < 1.60:
+                if stock in ("High", "Medium") and vram >= 45 and (lp.get("uninterruptablePrice") or 9999) < 1.60:
                     available.append({
                         "id": g["id"],
                         "name": g["displayName"],
