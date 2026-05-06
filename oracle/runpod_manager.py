@@ -302,7 +302,7 @@ class RunPodManager:
                 "--gpu-memory-utilization", "0.85",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
-                "--tool-call-parser", "hermes",
+                "--tool-call-parser", "pythonic",
                 "--enable-auto-tool-choice",
                 *( ["--pipeline-parallel-size", "2"] if is_a40 else [] ),
                 "--port", "8000",
