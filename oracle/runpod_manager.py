@@ -246,7 +246,7 @@ class RunPodManager:
                 vram = g.get("memoryInGb", 0)
                 if stock in ("High", "Medium") and vram >= 24:
                     available.append({
-                        "id": g["displayName"],
+                        "id": g["id"],
                         "name": g["displayName"],
                         "vram": vram,
                         "price": price,
