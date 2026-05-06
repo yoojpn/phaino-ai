@@ -296,7 +296,7 @@ class RunPodManager:
             "containerDiskInGb": int(os.getenv("RUNPOD_DISK_SIZE", "100")),
             "ports": [f"{VLLM_PORT}/http"],
             "dockerStartCmd": [
-                "--model", "Qwen/Qwen3.6-27B",
+                "--model", "Qwen/Qwen3.6-27B-FP8",
                 "--dtype", "bfloat16",
                 "--max-model-len", "16384",
                 "--gpu-memory-utilization", "0.85",
