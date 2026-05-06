@@ -294,7 +294,6 @@ class RunPodManager:
                 "--max-model-len", "16384",
                 "--gpu-memory-utilization", "0.90",
                 "--tensor-parallel-size", "2",
-                "--worker-use-ray", "false",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
                 "--tool-call-parser", "qwen3_coder",
