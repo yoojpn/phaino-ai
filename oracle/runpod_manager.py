@@ -291,7 +291,7 @@ class RunPodManager:
             "dockerStartCmd": [
                 "--model", "Qwen/Qwen3.6-27B-FP8",
                 "--quantization", "fp8",
-                "--max-model-len", "16384",
+                "--max-model-len", "8192",
                 "--gpu-memory-utilization", "0.60",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
