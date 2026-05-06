@@ -285,8 +285,7 @@ class RunPodManager:
         """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
         gpu_candidates = await self._get_available_gpus()
         selected_gpus = [g for g in gpu_candidates if g in VALID_GPU_IDS][:8]
-        is_a40 = any('A40' in g for g in selected_gpus[:1])
-        gpu_count = 2 if is_a40 else 1
+        gpu_count = 1
 
         base_payload = {
             "name": RUNPOD_POD_NAME,
@@ -297,14 +296,13 @@ class RunPodManager:
             "ports": [f"{VLLM_PORT}/http"],
             "dockerStartCmd": [
                 "--model", "Qwen/Qwen3.6-27B-FP8",
-                "--dtype", "bfloat16",
+                "--dtype", "auto",
                 "--max-model-len", "16384",
                 "--gpu-memory-utilization", "0.85",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
                 "--tool-call-parser", "pythonic",
                 "--enable-auto-tool-choice",
-                *( ["--pipeline-parallel-size", "2"] if is_a40 else [] ),
                 "--port", "8000",
                 "--enforce-eager"
             ],
