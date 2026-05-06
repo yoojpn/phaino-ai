@@ -57,6 +57,18 @@ class InputLoader:
     # ===========================
     def load_github(self, url: str) -> List[CodeFile]:
         print(f"[*] GitHub取得: {url}")
+        # サブディレクトリ指定: /tree/BRANCH/PATH or /blob/BRANCH/PATH
+        subdir_match = re.search(
+            r"github\.com/([^/]+/[^/]+)/(?:tree|blob)/([^/]+)/(.+)", url
+        )
+        if subdir_match:
+            repo   = subdir_match.group(1)
+            branch = subdir_match.group(2)
+            subdir = subdir_match.group(3).rstrip("/")
+            print(f"  サブディレクトリ指定: {subdir} (branch={branch})")
+            files = self._load_github_api(repo, branch=branch, subdir=subdir)
+            if files:
+                return files
         match = re.search(r"github\.com/([^/]+/[^/]+)", url)
         if match:
             repo  = match.group(1).rstrip(".git")
@@ -65,7 +77,7 @@ class InputLoader:
                 return files
         return self._load_github_clone(url)
 
-    def _load_github_api(self, repo: str) -> List[CodeFile]:
+    def _load_github_api(self, repo: str, branch: str = None, subdir: str = None) -> List[CodeFile]:
         headers = {"Accept": "application/vnd.github.v3+json"}
         if self.github_token:
             headers["Authorization"] = f"token {self.github_token}"
@@ -84,7 +96,7 @@ class InputLoader:
         # ファイルツリー取得
         try:
             resp = requests.get(
-                f"https://api.github.com/repos/{repo}/git/trees/{default_branch}?recursive=1",
+                f"https://api.github.com/repos/{repo}/git/trees/{branch or default_branch}?recursive=1",
                 headers=headers, timeout=30,
             )
             resp.raise_for_status()
@@ -101,6 +113,8 @@ class InputLoader:
             if item.get("type") != "blob":
                 continue
             path = item.get("path", "")
+            if subdir and not path.startswith(subdir + "/") and path != subdir:
+                continue
             ext  = Path(path).suffix.lower()
             lang = CODE_EXTENSIONS.get(ext)
             if not lang:
