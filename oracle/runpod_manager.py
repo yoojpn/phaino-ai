@@ -246,7 +246,7 @@ class RunPodManager:
                 vram = g.get("memoryInGb", 0)
                 if stock in ("High", "Medium") and vram >= 24:
                     available.append({
-                        "id": g["id"],
+                        "id": g["displayName"],
                         "name": g["displayName"],
                         "vram": vram,
                         "price": price,
@@ -270,13 +270,13 @@ class RunPodManager:
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
             return [
+                "NVIDIA GeForce RTX 4090",
                 "NVIDIA L40S",
                 "NVIDIA RTX 6000 Ada Generation",
                 "NVIDIA L40",
-                os.getenv("RUNPOD_GPU_TYPE", "NVIDIA GeForce RTX 4090"),
                 "NVIDIA RTX A5000",
                 "NVIDIA GeForce RTX 3090",
-                "NVIDIA RTX 5090",
+                "NVIDIA GeForce RTX 5090",
                 "NVIDIA A40",
             ]
 
