@@ -16,16 +16,9 @@ import httpx
 logger = logging.getLogger("oracle.runpod_manager")
 
 VALID_GPU_IDS = {
-    'NVIDIA A100 80GB PCIe',
-    'NVIDIA A100-SXM4-80GB',
-    'NVIDIA L40S',
-    'NVIDIA L40',
     'NVIDIA A40',
+    'NVIDIA L40',
     'NVIDIA RTX A6000',
-    'NVIDIA RTX 6000 Ada Generation',
-    'NVIDIA H100 PCIe',
-    'NVIDIA H100 NVL',
-    'NVIDIA H100 80GB HBM3',
 }
 
 RUNPOD_API_KEY      = os.getenv("RUNPOD_API_KEY", "")
@@ -257,7 +250,7 @@ class RunPodManager:
                 stock = lp.get("stockStatus", "")
                 price = lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999
                 vram = g.get("memoryInGb", 0)
-                if stock in ("High", "Medium") and vram >= 48:
+                if stock in ("High", "Medium") and vram >= 48 and (lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999) < 1.00:
                     available.append({
                         "id": g["id"],
                         "name": g["displayName"],
@@ -282,15 +275,7 @@ class RunPodManager:
             return [g["id"] for g in filtered]
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
-            return [
-                "NVIDIA A40",
-                "NVIDIA L40",
-                "NVIDIA L40S",
-                "NVIDIA A100 80GB PCIe",
-                "NVIDIA A100-SXM4-80GB",
-                "NVIDIA RTX 6000 Ada Generation",
-                "NVIDIA GeForce RTX 4090",
-            ]
+            return ["NVIDIA A40", "NVIDIA L40", "NVIDIA RTX A6000"]
 
     async def _create_pod(self) -> str:
         """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
