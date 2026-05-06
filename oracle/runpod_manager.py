@@ -257,9 +257,20 @@ class RunPodManager:
             available.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
             logger.info(f"GPU在庫確認: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
             # 4090に性能・金額が近いGPUを優先するスコアリング
-            # 優先フィルタなしで在庫ありGPUをそのまま返す
-            logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
-            return [g["id"] for g in available]
+            GPU_PRIORITY = {
+                "NVIDIA A100 80GB PCIe":     1,
+                "NVIDIA A100-SXM4-80GB":     2,
+                "NVIDIA A100 80GB":          3,
+                "NVIDIA RTX 6000 Ada Generation": 4,
+                "NVIDIA L40":                5,
+            }
+            filtered = [g for g in available if g["id"] in GPU_PRIORITY]
+            filtered.sort(key=lambda x: (
+                0 if x["stock"] == "High" else 1,
+                GPU_PRIORITY.get(x["id"], 99)
+            ))
+            logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
+            return [g["id"] for g in filtered]
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
             return [
@@ -280,7 +291,7 @@ class RunPodManager:
         base_payload = {
             "name": RUNPOD_POD_NAME,
             "imageName": POD_IMAGE,
-
+            "gpuTypeIds": gpu_candidates[:8],
             "gpuCount": 1,
             "containerDiskInGb": int(os.getenv("RUNPOD_DISK_SIZE", "100")),
             "ports": [f"{VLLM_PORT}/http"],
@@ -315,19 +326,15 @@ class RunPodManager:
             },
         }
 
-        # gpuTypeIds(配列)非対応のAPIのためgpuTypeIdを1つずつ試す
-        attempts = []
-        for gpu_id in gpu_candidates[:8]:
-            payload_base = {**base_payload, "gpuTypeId": gpu_id}
-            payload_base.pop("gpuTypeIds", None)
-            attempts.append(("Spot",      {**payload_base, "interruptible": True}))
-            attempts.append(("On-demand", {**payload_base, "interruptible": False}))
+        attempts = [
+            ("Spot",      {**base_payload, "interruptible": True}),
+            ("On-demand", {**base_payload, "interruptible": False}),
+        ]
 
         last_error = None
         for label, payload in attempts:
             try:
-                gpu_id = payload.get("gpuTypeId", "?")
-                logger.info(f"Pod作成試行: {label} / GPU: {gpu_id}")
+                logger.info(f"Pod作成試行: {label} / GPUs: {gpu_candidates[:4]}...")
                 logger.info(f"Pod作成ペイロード imageName={payload.get('imageName')} dockerStartCmd={payload.get('dockerStartCmd')}")
                 async with httpx.AsyncClient() as client:
                     resp = await client.post(
@@ -348,7 +355,7 @@ class RunPodManager:
                         return pod_id
                     else:
                         err_msg = data.get("error") if isinstance(data, dict) else str(data)
-                        logger.warning(f"{label} GPU={gpu_id} 失敗: {err_msg}")
+                        logger.warning(f"{label} 失敗: {err_msg}")
                         last_error = err_msg
             except Exception as e:
                 logger.warning(f"{label} 例外: {e}")
