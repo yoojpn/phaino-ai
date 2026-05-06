@@ -16,9 +16,8 @@ import httpx
 logger = logging.getLogger("oracle.runpod_manager")
 
 VALID_GPU_IDS = {
-    'NVIDIA A40',
-    'NVIDIA L40',
-    'NVIDIA RTX A6000',
+    'NVIDIA A100 80GB PCIe',
+    'NVIDIA A100-SXM4-80GB',
 }
 
 RUNPOD_API_KEY      = os.getenv("RUNPOD_API_KEY", "")
@@ -250,7 +249,7 @@ class RunPodManager:
                 stock = lp.get("stockStatus", "")
                 price = lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999
                 vram = g.get("memoryInGb", 0)
-                if stock in ("High", "Medium") and vram >= 48 and (lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999) < 1.00:
+                if stock in ("High", "Medium") and vram >= 80 and (lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999) < 1.60:
                     available.append({
                         "id": g["id"],
                         "name": g["displayName"],
@@ -272,10 +271,10 @@ class RunPodManager:
             filtered = available
             filtered.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
             logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
-            return [g["id"] for g in filtered]
+            return ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"] for g in filtered]
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
-            return ["NVIDIA A40", "NVIDIA RTX A6000", "NVIDIA L40S"]
+            return ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"]
 
     async def _create_pod(self) -> str:
         """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
@@ -285,7 +284,7 @@ class RunPodManager:
             "name": RUNPOD_POD_NAME,
             "imageName": POD_IMAGE,
             "gpuTypeIds": [g for g in gpu_candidates if g in VALID_GPU_IDS][:8],
-            "gpuCount": 2,
+            "gpuCount": 1,
             "containerDiskInGb": int(os.getenv("RUNPOD_DISK_SIZE", "100")),
             "ports": [f"{VLLM_PORT}/http"],
             "dockerStartCmd": [
@@ -293,7 +292,6 @@ class RunPodManager:
                 "--quantization", "fp8",
                 "--max-model-len", "16384",
                 "--gpu-memory-utilization", "0.75",
-                "--tensor-parallel-size", "2",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
                 "--tool-call-parser", "qwen3_coder",
