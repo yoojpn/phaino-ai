@@ -307,7 +307,6 @@ class RunPodManager:
                 *( ["--tensor-parallel-size", "2"] if is_a40 else [] ),
                 "--port", "8000"
             ],
-            "allowedCudaVersions": ["12.8", "12.9"],
             "env": {
                 # vllm/vllm-openai イメージはこれらの環境変数を読む
                 "MODEL": os.getenv("MODEL_ID", "Qwen/Qwen3.6-27B-FP8"),
