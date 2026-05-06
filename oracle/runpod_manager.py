@@ -24,7 +24,7 @@ VALID_GPU_IDS = {
 RUNPOD_API_KEY      = os.getenv("RUNPOD_API_KEY", "")
 RUNPOD_POD_NAME     = os.getenv("RUNPOD_POD_NAME", "vulnscan")
 VLLM_PORT           = int(os.getenv("VLLM_PORT", "8000"))
-VLLM_HEALTH_TIMEOUT = int(os.getenv("VLLM_HEALTH_TIMEOUT", "600"))
+VLLM_HEALTH_TIMEOUT = int(os.getenv("VLLM_HEALTH_TIMEOUT", "900"))
 RUNPOD_API_BASE     = "https://api.runpod.io/graphql"
 
 POD_IMAGE      = os.getenv("RUNPOD_IMAGE", "vllm/vllm-openai:latest")
