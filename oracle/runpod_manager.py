@@ -289,7 +289,7 @@ class RunPodManager:
             "name": RUNPOD_POD_NAME,
             "imageName": POD_IMAGE,
             "gpuTypeIds": [g for g in gpu_candidates if g in VALID_GPU_IDS][:8],
-            "gpuCount": 1,
+            "gpuCount": 2,
             "containerDiskInGb": int(os.getenv("RUNPOD_DISK_SIZE", "100")),
             "ports": [f"{VLLM_PORT}/http"],
             "dockerStartCmd": [
@@ -301,6 +301,7 @@ class RunPodManager:
                 "--trust-remote-code",
                 "--tool-call-parser", "hermes",
                 "--enable-auto-tool-choice",
+                "--tensor-parallel-size", "2",
                 "--port", "8000"
             ],
             "allowedCudaVersions": ["12.8", "12.9"],
@@ -321,6 +322,7 @@ class RunPodManager:
                 "VLLM_DTYPE": "float16",
                 "HF_HUB_ENABLE_HF_TRANSFER": "1",
                 "HF_HOME": "/runpod-volume/hf_cache",
+                "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             },
         }
 
