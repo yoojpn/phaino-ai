@@ -271,7 +271,7 @@ class RunPodManager:
             filtered = available
             filtered.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
             logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
-            return ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"] for g in filtered]
+            return [g["id"] for g in filtered]
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
             return ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"]
