@@ -288,14 +288,13 @@ class RunPodManager:
         except Exception as e:
             logger.warning(f"GPU在庫確認失敗、デフォルト使用: {e}")
             return [
-                "NVIDIA GeForce RTX 4090",
-                "NVIDIA L40S",
-                "NVIDIA RTX 6000 Ada Generation",
-                "NVIDIA L40",
-                "NVIDIA RTX A5000",
-                "NVIDIA GeForce RTX 3090",
-                "NVIDIA GeForce RTX 5090",
                 "NVIDIA A40",
+                "NVIDIA L40",
+                "NVIDIA L40S",
+                "NVIDIA A100 80GB PCIe",
+                "NVIDIA A100-SXM4-80GB",
+                "NVIDIA RTX 6000 Ada Generation",
+                "NVIDIA GeForce RTX 4090",
             ]
 
     async def _create_pod(self) -> str:
