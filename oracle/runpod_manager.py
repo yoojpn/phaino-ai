@@ -264,8 +264,8 @@ class RunPodManager:
                 "NVIDIA RTX 6000 Ada Generation": 4,
                 "NVIDIA L40":                5,
             }
-            filtered = [g for g in available if g["id"] in GPU_PRIORITY]
-            filtered.sort(key=lambda x: (
+            filtered = available
+            filtered.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
                 0 if x["stock"] == "High" else 1,
                 GPU_PRIORITY.get(x["id"], 99)
             ))
