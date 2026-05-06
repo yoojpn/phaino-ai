@@ -326,6 +326,8 @@ class RunPodManager:
                 "HF_HUB_ENABLE_HF_TRANSFER": "1",
                 "HF_HOME": "/runpod-volume/hf_cache",
                 "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+                "NCCL_SHM_DISABLE": "1",
+                "NCCL_P2P_DISABLE": "1",
             },
         }
 
