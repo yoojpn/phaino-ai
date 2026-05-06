@@ -16,6 +16,7 @@ import httpx
 logger = logging.getLogger("oracle.runpod_manager")
 
 VALID_GPU_IDS = {
+    'NVIDIA A40',
     'NVIDIA A100 80GB PCIe',
     'NVIDIA A100-SXM4-80GB',
 }
@@ -249,7 +250,7 @@ class RunPodManager:
                 stock = lp.get("stockStatus", "")
                 price = lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999
                 vram = g.get("memoryInGb", 0)
-                if stock in ("High", "Medium") and vram >= 80 and (lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999) < 1.60:
+                if stock in ("High", "Medium") and vram >= 45 and (lp.get("interruptablePrice") or lp.get("uninterruptablePrice") or 9999) < 1.60:
                     available.append({
                         "id": g["id"],
                         "name": g["displayName"],
@@ -262,14 +263,15 @@ class RunPodManager:
             logger.info(f"GPU在庫確認: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
             # 4090に性能・金額が近いGPUを優先するスコアリング
             GPU_PRIORITY = {
-                "NVIDIA A100 80GB PCIe":     1,
-                "NVIDIA A100-SXM4-80GB":     2,
-                "NVIDIA A100 80GB":          3,
-                "NVIDIA RTX 6000 Ada Generation": 4,
-                "NVIDIA L40":                5,
+                "NVIDIA A40":                1,
+                "NVIDIA A100 80GB PCIe":     2,
+                "NVIDIA A100-SXM4-80GB":     3,
+                "NVIDIA A100 80GB":          4,
+                "NVIDIA RTX 6000 Ada Generation": 5,
+                "NVIDIA L40":                6,
             }
             filtered = available
-            filtered.sort(key=lambda x: (0 if x["stock"] == "High" else 1, x["price"]))
+            filtered.sort(key=lambda x: (GPU_PRIORITY.get(x["name"], 99), 0 if x["stock"] == "High" else 1, x["price"]))
             logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
             return [g["id"] for g in filtered]
         except Exception as e:
