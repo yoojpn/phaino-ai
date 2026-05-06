@@ -164,6 +164,22 @@ class InputLoader:
         print(f"[+] {len(files)}件のコードファイルを取得")
         return files
 
+
+    def _load_github_clone_sparse(self, repo: str, branch: str, subdir: str):
+        import tempfile, subprocess
+        tmpdir = tempfile.mkdtemp(prefix="vulnscan_sparse_")
+        try:
+            clone_url = f"https://github.com/{repo}.git"
+            subprocess.run(["git", "clone", "--depth=1", "--filter=blob:none",
+                           "--sparse", clone_url, tmpdir],
+                          check=True, capture_output=True)
+            subprocess.run(["git", "sparse-checkout", "set", subdir],
+                          check=True, capture_output=True, cwd=tmpdir)
+            return self.load_dir(str(Path(tmpdir) / subdir))
+        except Exception as e:
+            print(f"  [-] sparse clone失敗: {e}")
+            return []
+
     def _load_github_clone(self, url: str) -> List[CodeFile]:
         print(f"  [*] git clone フォールバック...")
         tmpdir = tempfile.mkdtemp(prefix="vulnscan_")
