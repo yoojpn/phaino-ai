@@ -299,7 +299,7 @@ class RunPodManager:
                 "--model", "Qwen/Qwen3.6-27B",
                 "--dtype", "bfloat16",
                 "--max-model-len", "16384",
-                "--gpu-memory-utilization", "0.75",
+                "--gpu-memory-utilization", "0.85",
                 "--served-model-name", "Qwen/Qwen3.6-27B",
                 "--trust-remote-code",
                 "--tool-call-parser", "hermes",
