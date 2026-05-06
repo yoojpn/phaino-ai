@@ -298,6 +298,7 @@ class RunPodManager:
                 "--enable-auto-tool-choice",
                 "--port", "8000"
             ],
+            "minCudaVersion": "12.8",
             "env": {
                 # vllm/vllm-openai イメージはこれらの環境変数を読む
                 "MODEL": os.getenv("MODEL_ID", "Qwen/Qwen3.6-27B-FP8"),
