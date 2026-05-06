@@ -280,7 +280,7 @@ class RunPodManager:
         base_payload = {
             "name": RUNPOD_POD_NAME,
             "imageName": POD_IMAGE,
-            "gpuTypeIds": gpu_candidates[:8],
+
             "gpuCount": 1,
             "containerDiskInGb": int(os.getenv("RUNPOD_DISK_SIZE", "100")),
             "ports": [f"{VLLM_PORT}/http"],
