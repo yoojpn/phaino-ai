@@ -305,7 +305,8 @@ class RunPodManager:
                 "--tool-call-parser", "hermes",
                 "--enable-auto-tool-choice",
                 *( ["--tensor-parallel-size", "2"] if is_a40 else [] ),
-                "--port", "8000"
+                "--port", "8000",
+                "--enforce-eager"
             ],
             "env": {
                 # vllm/vllm-openai イメージはこれらの環境変数を読む
