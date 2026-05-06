@@ -145,12 +145,7 @@ class InputLoader:
                     content = blob_data.get("content", "")
                 if not content.strip():
                     return None
-                lines    = content.split("\n")
-                max_line = max((len(l) for l in lines), default=0)
-                if len(lines) < 10 and max_line > 500:
-                    return None
-                if max_line > 2000:
-                    return None
+
                 return CodeFile(path=path, language=lang, content=content)
             except Exception:
                 return None
@@ -282,12 +277,7 @@ class InputLoader:
                 content  = path.read_text(encoding="utf-8", errors="ignore")
                 if not content.strip():
                     continue
-                lines    = content.split("\n")
-                max_line = max((len(l) for l in lines), default=0)
-                if len(lines) < 10 and max_line > 500:
-                    continue
-                if max_line > 2000:
-                    continue
+
                 files.append(CodeFile(
                     path=str(path.relative_to(root_path)),
                     language=lang,
