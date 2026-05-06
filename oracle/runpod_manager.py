@@ -232,7 +232,6 @@ class RunPodManager:
                 lowestPrice(input: {gpuCount: 1, minMemoryInGb: 20}) {
                     stockStatus
                     uninterruptablePrice
-                    minPrice
                 }
             }
         }
