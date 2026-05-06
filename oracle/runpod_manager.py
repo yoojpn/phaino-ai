@@ -262,7 +262,7 @@ class RunPodManager:
                 stock = lp.get("stockStatus", "")
                 price = lp.get("uninterruptablePrice") or 9999
                 vram = g.get("memoryInGb", 0)
-                if stock in ("High", "Medium") and vram >= 24:
+                if stock in ("High", "Medium") and vram >= 48:
                     available.append({
                         "id": g["id"],
                         "name": g["displayName"],
