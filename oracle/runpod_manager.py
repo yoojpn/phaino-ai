@@ -304,7 +304,7 @@ class RunPodManager:
                 "--trust-remote-code",
                 "--tool-call-parser", "hermes",
                 "--enable-auto-tool-choice",
-                *( ["--tensor-parallel-size", "2"] if is_a40 else [] ),
+                *( ["--pipeline-parallel-size", "2"] if is_a40 else [] ),
                 "--port", "8000",
                 "--enforce-eager"
             ],
