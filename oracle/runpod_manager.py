@@ -330,7 +330,6 @@ class RunPodManager:
         }
 
         attempts = [
-            ("Spot",      {**base_payload, "interruptible": True}),
             ("On-demand", {**base_payload, "interruptible": False}),
         ]
 
