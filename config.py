@@ -66,8 +66,7 @@ EXCLUDE_DIRS = {
     "fixtures", "mocks", "mock", "spec", "specs",
     "benchmarks", "benchmark", "perf",
     # 言語バインディング・自動生成
-    "python", "ruby", "java", "csharp", "php", "objc",
-    "javascript", "kotlin", "swift", "lua", "perl",
+    "csharp", "objc", "kotlin", "swift", "lua", "perl",
     "generated", "gen", "auto_generated", "pb",
     # ドキュメント・サンプル
     "docs", "doc", "examples", "example", "samples", "demo",
