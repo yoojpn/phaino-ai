@@ -47,7 +47,7 @@ _CPU_POD_INLINE_SCRIPT = (
     "pip install -q fastapi uvicorn tree-sitter tree-sitter-python tree-sitter-javascript "
     "tree-sitter-java tree-sitter-c tree-sitter-cpp tree-sitter-go tree-sitter-rust "
     "PyGithub httpx pydantic && "
-    "cd /workspace && "
+    "mkdir -p /workspace && cd /workspace && "
     "(git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan || "
     "(cd vulnscan && git pull)) && "
     "cd /workspace/vulnscan && "
@@ -190,7 +190,7 @@ class CpuPodManager:
             "cloudType": "COMMUNITY",
             "computeType": "CPU",
             "cpuFlavorIds": [CPU_POD_TYPE],
-            "vcpuCount": 8,
+            "vcpuCount": 4,
             "containerDiskInGb": CPU_POD_DISK_SIZE,
             "ports": [f"{CPU_POD_PORT}/http"],
             "dockerStartCmd": CPU_POD_START_CMD,
