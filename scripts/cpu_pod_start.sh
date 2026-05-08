@@ -6,7 +6,7 @@ set -e
 
 echo "[CPU Worker] 起動開始..."
 
-# 依存インストール
+# 依存インストール（失敗しても続行）
 pip install -q \
     fastapi \
     uvicorn \
@@ -26,11 +26,22 @@ pip install -q \
     pydantic
 
 # vulnscanをクローン（最新版）
+mkdir -p /workspace
 cd /workspace
-if [ ! -d "vulnscan" ]; then
-    git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan
+if [ ! -d "vulnscan/.git" ]; then
+    echo "[CPU Worker] git clone..."
+    rm -rf vulnscan
+    git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan || {
+        echo "[CPU Worker] git clone失敗、リトライ..."
+        sleep 5
+        git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan
+    }
 else
-    cd vulnscan && git pull && cd ..
+    echo "[CPU Worker] git pull..."
+    cd vulnscan
+    git fetch origin || true
+    git reset --hard origin/main || true
+    cd ..
 fi
 
 export VULNSCAN_ROOT=/workspace/vulnscan
