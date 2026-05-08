@@ -183,7 +183,7 @@ class CpuPodManager:
             "containerDiskInGb": CPU_POD_DISK_SIZE,
             "ports": [f"{CPU_POD_PORT}/http"],
             "startSsh": False,
-            "dockerStartCmd": CPU_POD_START_CMD,
+            "dockerStartCmd": CPU_POD_START_CMD.split() if isinstance(CPU_POD_START_CMD, str) else CPU_POD_START_CMD,
             "env": {
                 "VULNSCAN_ROOT": "/workspace/vulnscan",
                 "CPU_POD_PORT": str(CPU_POD_PORT),
