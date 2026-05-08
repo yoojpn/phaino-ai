@@ -43,10 +43,19 @@ CPU_POD_DISK_SIZE   = int(os.getenv("CPU_POD_DISK_SIZE", "20"))
 CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "300"))
 # 8vCPUs 16GB RAM $0.28/hr に対応するRunPodのCPUタイプ
 CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c")  # 有効値: cpu3c/cpu3g/cpu3m/cpu5c/cpu5g/cpu5m
-CPU_POD_START_CMD   = os.getenv(
-    "CPU_POD_START_CMD",
-    "bash /workspace/vulnscan/scripts/cpu_pod_start.sh"
+_CPU_POD_INLINE_SCRIPT = (
+    "pip install -q fastapi uvicorn tree-sitter tree-sitter-python tree-sitter-javascript "
+    "tree-sitter-java tree-sitter-c tree-sitter-cpp tree-sitter-go tree-sitter-rust "
+    "PyGithub httpx pydantic && "
+    "cd /workspace && "
+    "(git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan || "
+    "(cd vulnscan && git pull)) && "
+    "cd /workspace/vulnscan && "
+    "exec uvicorn oracle.cpu_worker_server:app --host 0.0.0.0 --port ${CPU_POD_PORT:-8001} --workers 4"
 )
+# dockerStartCmd は配列形式で渡す必要がある
+_env_cmd = os.getenv("CPU_POD_START_CMD")
+CPU_POD_START_CMD: list = _env_cmd.split() if _env_cmd else ["bash", "-c", _CPU_POD_INLINE_SCRIPT]
 
 
 class CpuPodManager:
@@ -185,7 +194,7 @@ class CpuPodManager:
             "memoryInGb": 16,
             "containerDiskInGb": CPU_POD_DISK_SIZE,
             "ports": [f"{CPU_POD_PORT}/http"],
-            "dockerStartCmd": CPU_POD_START_CMD.split() if isinstance(CPU_POD_START_CMD, str) else CPU_POD_START_CMD,
+            "dockerStartCmd": CPU_POD_START_CMD,
             "env": {
                 "VULNSCAN_ROOT": "/workspace/vulnscan",
                 "CPU_POD_PORT": str(CPU_POD_PORT),
