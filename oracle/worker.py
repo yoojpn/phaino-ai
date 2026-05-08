@@ -141,6 +141,9 @@ class ScanWorker:
                     params=r["params"],
                     taint_sources=r["taint_sources"],
                     taint_sinks=r["taint_sinks"],
+                    class_name=r.get("class_name"),
+                    class_parents=r.get("class_parents", []),
+                    annotations=r.get("annotations", []),
                 )
                 # 多段taint伝播結果を付与
                 c.propagated_sources = r.get("propagated_sources", [])
@@ -193,7 +196,15 @@ class ScanWorker:
                 self._log(job_id, f"  優先度フィルタ: {original_count}関数 → {len(chunks)}関数\n")
 
             compound_groups = _build_compound_groups(chunks)
-            self._log(job_id, f"\n[Step 4] 複合グループ: {len(compound_groups)}件\n")
+            class_groups = omniscient.build_class_groups()
+            taint_chain_groups = omniscient.build_taint_chain_groups()
+            total_group_count = len(compound_groups) + len(class_groups) + len(taint_chain_groups)
+            self._log(job_id, (
+                f"\n[Step 4] グループ構築: "
+                f"複合={len(compound_groups)}件 / "
+                f"クラス={len(class_groups)}件 / "
+                f"taintチェーン={len(taint_chain_groups)}件\n"
+            ))
 
             # ===========================
             # Step 4: LLM解析（A40起動）
@@ -206,7 +217,7 @@ class ScanWorker:
 
             llm_analyzer = VulnAnalyzer()
             total_single   = len(chunks)
-            total_compound = len(compound_groups)
+            total_compound = total_group_count
             total_funcs    = total_single + total_compound
             self._log(job_id, f"  LLM: 0/{total_funcs} 関数完了 | 脆弱性候補: 0件\n")
 
@@ -230,18 +241,24 @@ class ScanWorker:
 
             async def run_compound():
                 results = []
-                for group in compound_groups:
-                    from analyzer.llm import build_compound_prompt
-                    prompt = build_compound_prompt(group)
-                    r = await llm_analyzer._call_llm(
-                        prompt, group[0], is_compound=True, compound_group=group
-                    )
-                    async with counter_lock:
-                        compound_done[0] += 1
-                        if r and r.label.is_vulnerable:
-                            compound_vulns[0] += 1
-                            results.append(r)
-                    await _log_progress()
+                all_groups = [
+                    (compound_groups, "compound"),
+                    (class_groups, "compound"),
+                    (taint_chain_groups, "taint_chain"),
+                ]
+                for groups, gtype in all_groups:
+                    for group in groups:
+                        from analyzer.llm import build_compound_prompt
+                        prompt = build_compound_prompt(group, group_type=gtype)
+                        r = await llm_analyzer._call_llm(
+                            prompt, group[0], is_compound=True, compound_group=group
+                        )
+                        async with counter_lock:
+                            compound_done[0] += 1
+                            if r and r.label.is_vulnerable:
+                                compound_vulns[0] += 1
+                                results.append(r)
+                        await _log_progress()
                 return results
 
             single_results, compound_results = await asyncio.gather(

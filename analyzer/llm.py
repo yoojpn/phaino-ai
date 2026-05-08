@@ -72,12 +72,22 @@ class OmniscientContext:
                         self.call_graph[chunk.function_name].append(name)
                         self.reverse_graph[name].append(chunk.function_name)
 
-    def get_cross_file_context(self, chunk: FunctionChunk, max_lines: int = 60) -> str:
+    def get_cross_file_context(self, chunk: FunctionChunk, max_chars: int = 0) -> str:
         """
-        指定チャンクの呼び出し元・呼び出し先・同一ファイルの関数一覧・taint情報を返す
+        指定チャンクの呼び出し元・呼び出し先・同一クラス・同一ファイルの関数・taint情報を返す。
+        max_chars=0 は無制限（Qwen3.6-27Bの262Kコンテキストを活用）。
         """
         lines = []
         func_name = chunk.function_name
+
+        # クラス情報
+        if chunk.class_name:
+            class_header = f"class {chunk.class_name}"
+            if chunk.class_parents:
+                class_header += f" extends {', '.join(chunk.class_parents)}"
+            lines.append(f"=== Class: {class_header} ===")
+        if chunk.annotations:
+            lines.append(f"[Annotations] {' '.join(chunk.annotations)}")
 
         # AST由来のtaint情報 + 多段taint伝播結果
         has_taint = (chunk.taint_sources or chunk.taint_sinks
@@ -91,60 +101,148 @@ class OmniscientContext:
                 lines.append(f"[AST] taint sinks (dangerous): {chunk.taint_sinks[:8]}")
             if chunk.params:
                 lines.append(f"[AST] params: {chunk.params}")
-            # 多段taint伝播結果
             propagated = getattr(chunk, 'propagated_sources', [])
             taint_paths = getattr(chunk, 'taint_paths', [])
             if propagated:
                 lines.append(f"[TAINT] propagated tainted vars (multi-hop): {propagated[:12]}")
             if taint_paths:
                 lines.append("[TAINT] data flow paths:")
-                for p in taint_paths[:10]:
+                for p in taint_paths[:15]:
                     lines.append(f"  → {p}")
+
+        # 同一クラスの他メソッドを全コードつきで追加
+        if chunk.class_name:
+            same_class = [
+                c for c in self.chunks
+                if c.class_name == chunk.class_name
+                and c.file_path == chunk.file_path
+                and c.function_name != func_name
+            ]
+            if same_class:
+                lines.append(f"=== Other methods in class {chunk.class_name} ===")
+                for sc in same_class[:10]:
+                    lines.append(f"# {sc.function_name} (lines {sc.start_line}-{sc.end_line})")
+                    if sc.annotations:
+                        lines.append(f"  {' '.join(sc.annotations)}")
+                    if sc.taint_sources or sc.taint_sinks:
+                        lines.append(f"  taint: src={sc.taint_sources[:3]} sink={sc.taint_sinks[:3]}")
+                    lines.append(sc.code)
 
         # 呼び出し元（この関数を使っている関数）
         callers = self.reverse_graph.get(func_name, [])
         if callers:
             lines.append(f"=== Callers of {func_name} ===")
-            for caller in callers[:3]:
+            for caller in callers[:5]:
                 caller_chunk = self.func_map.get(caller)
                 if caller_chunk:
-                    snippet = caller_chunk.code[:600]
                     lines.append(f"# {caller} ({caller_chunk.file_path})")
+                    if caller_chunk.annotations:
+                        lines.append(f"  {' '.join(caller_chunk.annotations)}")
                     if caller_chunk.taint_sources:
                         lines.append(f"  caller taint sources: {caller_chunk.taint_sources[:4]}")
                     caller_propagated = getattr(caller_chunk, 'propagated_sources', [])
                     if caller_propagated:
                         lines.append(f"  caller propagated taint: {caller_propagated[:4]}")
-                    lines.append(snippet)
+                    lines.append(caller_chunk.code)
 
         # 呼び出し先（この関数が呼ぶ関数）
         callees = self.call_graph.get(func_name, [])
         if callees:
             lines.append(f"=== Callees from {func_name} ===")
-            for callee in callees[:3]:
+            for callee in callees[:5]:
                 callee_chunk = self.func_map.get(callee)
                 if callee_chunk:
-                    snippet = callee_chunk.code[:600]
                     lines.append(f"# {callee} ({callee_chunk.file_path})")
+                    if callee_chunk.annotations:
+                        lines.append(f"  {' '.join(callee_chunk.annotations)}")
                     if callee_chunk.taint_sinks:
                         lines.append(f"  callee taint sinks: {callee_chunk.taint_sinks[:4]}")
                     callee_propagated = getattr(callee_chunk, 'propagated_sources', [])
                     if callee_propagated:
                         lines.append(f"  callee propagated taint: {callee_propagated[:4]}")
-                    lines.append(snippet)
+                    lines.append(callee_chunk.code)
 
-        # 同一ファイルの他関数一覧
+        # 同一ファイルの他関数一覧（コードなし、名前だけ）
         file_funcs = [f for f in self.file_funcs.get(chunk.file_path, [])
                       if f != func_name]
         if file_funcs:
             lines.append(f"=== Other functions in {chunk.file_path} ===")
-            lines.append(", ".join(file_funcs[:20]))
+            lines.append(", ".join(file_funcs[:30]))
 
         result = "\n".join(lines)
-        # 文字数制限
-        if len(result) > max_lines * 80:
-            result = result[:max_lines * 80] + "\n...(truncated)"
+        if max_chars and len(result) > max_chars:
+            result = result[:max_chars] + "\n...(truncated)"
         return result
+
+    def build_class_groups(self) -> List[List[FunctionChunk]]:
+        """
+        同一クラスの全メソッドをグループ化して返す。
+        Qwen3.6-27Bに「クラス全体」を一度に見せるため。
+        優先度1-3のクラスのみ対象。
+        """
+        from collections import defaultdict
+        class_map: Dict[str, List[FunctionChunk]] = defaultdict(list)
+        for chunk in self.chunks:
+            if chunk.priority <= 3 and chunk.class_name:
+                key = f"{chunk.file_path}::{chunk.class_name}"
+                class_map[key].append(chunk)
+        # 2メソッド以上あるクラスのみ返す
+        return [group for group in class_map.values() if len(group) >= 2]
+
+    def build_taint_chain_groups(self) -> List[List[FunctionChunk]]:
+        """
+        taintチェーンに沿って関連関数をグループ化。
+        source→sinkのフルパスをLLMに一括で渡す。
+        """
+        groups = []
+        seen_funcs = set()
+
+        for chunk in self.chunks:
+            if chunk.function_name in seen_funcs:
+                continue
+            # propagated_sourcesとtaint_sinksが両方ある（実際のsource→sink経路）
+            propagated = getattr(chunk, 'propagated_sources', [])
+            if not (propagated and chunk.taint_sinks):
+                continue
+
+            # このsinkまでのチェーンを収集
+            chain = [chunk]
+            seen_funcs.add(chunk.function_name)
+
+            # callerを遡る（最大3段）
+            current = chunk.function_name
+            for _ in range(3):
+                callers = self.reverse_graph.get(current, [])
+                for caller in callers[:2]:
+                    if caller not in seen_funcs:
+                        caller_chunk = self.func_map.get(caller)
+                        if caller_chunk:
+                            chain.insert(0, caller_chunk)
+                            seen_funcs.add(caller)
+                if callers:
+                    current = callers[0]
+                else:
+                    break
+
+            # calleeを追う（最大3段）
+            current = chunk.function_name
+            for _ in range(3):
+                callees = self.call_graph.get(current, [])
+                for callee in callees[:2]:
+                    if callee not in seen_funcs:
+                        callee_chunk = self.func_map.get(callee)
+                        if callee_chunk and callee_chunk.taint_sinks:
+                            chain.append(callee_chunk)
+                            seen_funcs.add(callee)
+                if callees:
+                    current = callees[0]
+                else:
+                    break
+
+            if len(chain) >= 2:
+                groups.append(chain)
+
+        return groups
 
 
 # ===========================
@@ -284,9 +382,18 @@ Your goal is to find REAL, EXPLOITABLE vulnerabilities for bug bounty reports.
 # ===========================
 
 def build_structural_prompt(chunk: FunctionChunk, cross_file: str = "") -> str:
+    class_info = ""
+    if chunk.class_name:
+        class_header = f"class {chunk.class_name}"
+        if chunk.class_parents:
+            class_header += f" extends {', '.join(chunk.class_parents)}"
+        class_info = f"\n## Class: {class_header}"
+    if chunk.annotations:
+        class_info += f"\n## Annotations: {' '.join(chunk.annotations)}"
+
     return f"""Analyze this {chunk.language} code for security vulnerabilities.
 
-## File: {chunk.file_path} (lines {chunk.start_line}-{chunk.end_line})
+## File: {chunk.file_path} (lines {chunk.start_line}-{chunk.end_line}){class_info}
 ## Function: {chunk.function_name}
 
 ```{chunk.language}
@@ -398,19 +505,44 @@ Call report_vulnerability with your findings.
 """
 
 
-def build_compound_prompt(function_group: List[FunctionChunk]) -> str:
+def build_compound_prompt(function_group: List[FunctionChunk], group_type: str = "compound") -> str:
     code_sections = []
     for chunk in function_group:
+        class_info = ""
+        if chunk.class_name:
+            class_info = f" [class: {chunk.class_name}"
+            if chunk.class_parents:
+                class_info += f" extends {', '.join(chunk.class_parents)}"
+            class_info += "]"
+        annot_info = f"\n// Annotations: {' '.join(chunk.annotations)}" if chunk.annotations else ""
+        taint_info = ""
+        propagated = getattr(chunk, 'propagated_sources', [])
+        if chunk.taint_sources or propagated:
+            taint_info = f"\n// Taint sources: {(chunk.taint_sources + propagated)[:5]}"
+        if chunk.taint_sinks:
+            taint_info += f"\n// Taint sinks: {chunk.taint_sinks[:5]}"
         code_sections.append(f"""
-### {chunk.function_name} ({chunk.file_path})
+### {chunk.function_name} ({chunk.file_path}{class_info}){annot_info}{taint_info}
 ```{chunk.language}
 {chunk.code}
 ```""")
 
-    return f"""Analyze these MULTIPLE functions that work together.
+    if group_type == "taint_chain":
+        group_desc = "TAINT CHAIN — these functions form a source→sink data flow path"
+        analysis_focus = """
+## Taint Chain Analysis
 
-{''.join(code_sections)}
+The static analysis engine has identified this as a potential source→sink chain.
+Verify the complete data flow:
 
+1. **Source**: Where does user-controlled data enter the chain?
+2. **Propagation**: How does tainted data flow through each function?
+3. **Sink**: Does tainted data reach a dangerous operation without sanitization?
+4. **Bypass**: Can any sanitization in the middle be bypassed?
+"""
+    else:
+        group_desc = "these functions work together in the same class/module"
+        analysis_focus = """
 ## Compound Vulnerability Analysis
 
 Find vulnerabilities that ONLY exist because of how these functions INTERACT:
@@ -419,9 +551,14 @@ Find vulnerabilities that ONLY exist because of how these functions INTERACT:
 2. **Auth Bypass Chains**: Unprotected path to reach protected resource?
 3. **Second-Order**: Does A store data that B later executes?
 4. **Race Conditions**: State corruption across function calls?
+"""
 
+    return f"""Analyze these MULTIPLE functions — {group_desc}.
+
+{''.join(code_sections)}
+{analysis_focus}
 Do NOT classify each function individually.
-Find compound vulnerabilities with attack_model.type = "compound" or "second_order".
+Find compound vulnerabilities with attack_model.type = "compound", "second_order", or "injection".
 Call report_vulnerability with your findings.
 """
 

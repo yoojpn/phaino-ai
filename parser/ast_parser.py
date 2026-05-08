@@ -111,6 +111,10 @@ class FunctionChunk:
     taint_sources:   List[str] = field(default_factory=list)  # ユーザー入力を受け取る変数
     taint_sinks:     List[str] = field(default_factory=list)  # 危険な sink に渡る変数
     params:          List[str] = field(default_factory=list)  # 引数名リスト
+    # クラス構造情報（ASTParser が付与）
+    class_name:      Optional[str] = None                     # 所属クラス名
+    class_parents:   List[str] = field(default_factory=list)  # 継承元クラスリスト
+    annotations:     List[str] = field(default_factory=list)  # メソッドアノテーション (@RequestMapping 等)
 
 
 class ASTParser:
@@ -323,7 +327,61 @@ class ASTParser:
 
             return list(sources), list(sinks)
 
+        CLASS_NODE_TYPES = {
+            "python":     ["class_definition"],
+            "javascript": ["class_declaration", "class_expression"],
+            "typescript": ["class_declaration", "class_expression"],
+            "java":       ["class_declaration", "interface_declaration",
+                           "enum_declaration", "annotation_type_declaration"],
+            "c":          [],
+            "cpp":        ["class_specifier", "struct_specifier"],
+            "go":         [],
+            "rust":       ["impl_item"],
+        }.get(language, [])
+
+        def extract_class_info(class_node):
+            """クラス名・継承元を抽出"""
+            class_name = None
+            parents = []
+            for child in class_node.children:
+                if child.type in ("identifier", "type_identifier"):
+                    if class_name is None:
+                        class_name = node_text(child)
+                elif child.type in ("superclass", "extends_clause", "base_class",
+                                    "class_parents", "superclasses"):
+                    for sub in child.children:
+                        if sub.type in ("identifier", "type_identifier",
+                                        "scoped_type_identifier"):
+                            parents.append(node_text(sub))
+                elif child.type == "super_interfaces":
+                    for sub in child.children:
+                        if sub.type in ("type_list", "interface_type_list"):
+                            for t in sub.children:
+                                if t.type in ("type_identifier", "identifier"):
+                                    parents.append(node_text(t))
+            return class_name, parents
+
+        def extract_annotations(func_node):
+            """メソッド直前3行のアノテーション (@Xxx / @decorator) を抽出"""
+            start = func_node.start_point[0]
+            result = []
+            for i in range(max(0, start - 4), start):
+                line = lines[i].strip()
+                if line.startswith("@"):
+                    result.append(line)
+            return result
+
+        class_stack: List[tuple] = []  # (class_name, parents)
+
         def traverse(node):
+            if node.type in CLASS_NODE_TYPES:
+                cname, cparents = extract_class_info(node)
+                class_stack.append((cname, cparents))
+                for child in node.children:
+                    traverse(child)
+                class_stack.pop()
+                return
+
             if node.type in func_node_types:
                 name   = self._extract_func_name(node)
                 start  = node.start_point[0]
@@ -333,6 +391,8 @@ class ASTParser:
                     params       = extract_params(node)
                     calls        = extract_calls(node)
                     t_src, t_snk = extract_taint(node, params, code)
+                    cur_class, cur_parents = class_stack[-1] if class_stack else (None, [])
+                    annots = extract_annotations(node)
                     chunks.append(FunctionChunk(
                         file_path=file_path,
                         language=language,
@@ -344,6 +404,9 @@ class ASTParser:
                         params=params,
                         taint_sources=t_src,
                         taint_sinks=t_snk,
+                        class_name=cur_class,
+                        class_parents=cur_parents,
+                        annotations=annots,
                     ))
             for child in node.children:
                 traverse(child)

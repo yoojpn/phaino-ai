@@ -61,6 +61,10 @@ class ChunkData(BaseModel):
     # 多段taint伝播の結果
     propagated_sources: List[str] = []   # 伝播後のtaint変数セット
     taint_paths: List[str] = []          # source→sinkのパス説明
+    # クラス構造情報
+    class_name: Optional[str] = None
+    class_parents: List[str] = []
+    annotations: List[str] = []
 
 
 class AnalyzeResponse(BaseModel):
@@ -401,6 +405,9 @@ async def analyze(req: AnalyzeRequest):
                 taint_sinks=c.taint_sinks,
                 propagated_sources=propagated,
                 taint_paths=paths[:20],  # 多すぎる場合は先頭20件
+                class_name=getattr(c, "class_name", None),
+                class_parents=getattr(c, "class_parents", []),
+                annotations=getattr(c, "annotations", []),
             ))
 
         taint_summary = {
