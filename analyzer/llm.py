@@ -79,8 +79,11 @@ class OmniscientContext:
         lines = []
         func_name = chunk.function_name
 
-        # AST由来のtaint情報
-        if chunk.taint_sources or chunk.taint_sinks:
+        # AST由来のtaint情報 + 多段taint伝播結果
+        has_taint = (chunk.taint_sources or chunk.taint_sinks
+                     or getattr(chunk, 'propagated_sources', [])
+                     or getattr(chunk, 'taint_paths', []))
+        if has_taint:
             lines.append(f"=== Taint analysis for {func_name} ===")
             if chunk.taint_sources:
                 lines.append(f"[AST] taint sources (user-controlled): {chunk.taint_sources[:8]}")
@@ -88,6 +91,15 @@ class OmniscientContext:
                 lines.append(f"[AST] taint sinks (dangerous): {chunk.taint_sinks[:8]}")
             if chunk.params:
                 lines.append(f"[AST] params: {chunk.params}")
+            # 多段taint伝播結果
+            propagated = getattr(chunk, 'propagated_sources', [])
+            taint_paths = getattr(chunk, 'taint_paths', [])
+            if propagated:
+                lines.append(f"[TAINT] propagated tainted vars (multi-hop): {propagated[:12]}")
+            if taint_paths:
+                lines.append("[TAINT] data flow paths:")
+                for p in taint_paths[:10]:
+                    lines.append(f"  → {p}")
 
         # 呼び出し元（この関数を使っている関数）
         callers = self.reverse_graph.get(func_name, [])
@@ -96,10 +108,13 @@ class OmniscientContext:
             for caller in callers[:3]:
                 caller_chunk = self.func_map.get(caller)
                 if caller_chunk:
-                    snippet = caller_chunk.code[:300]
+                    snippet = caller_chunk.code[:600]
                     lines.append(f"# {caller} ({caller_chunk.file_path})")
                     if caller_chunk.taint_sources:
                         lines.append(f"  caller taint sources: {caller_chunk.taint_sources[:4]}")
+                    caller_propagated = getattr(caller_chunk, 'propagated_sources', [])
+                    if caller_propagated:
+                        lines.append(f"  caller propagated taint: {caller_propagated[:4]}")
                     lines.append(snippet)
 
         # 呼び出し先（この関数が呼ぶ関数）
@@ -109,10 +124,13 @@ class OmniscientContext:
             for callee in callees[:3]:
                 callee_chunk = self.func_map.get(callee)
                 if callee_chunk:
-                    snippet = callee_chunk.code[:300]
+                    snippet = callee_chunk.code[:600]
                     lines.append(f"# {callee} ({callee_chunk.file_path})")
                     if callee_chunk.taint_sinks:
                         lines.append(f"  callee taint sinks: {callee_chunk.taint_sinks[:4]}")
+                    callee_propagated = getattr(callee_chunk, 'propagated_sources', [])
+                    if callee_propagated:
+                        lines.append(f"  callee propagated taint: {callee_propagated[:4]}")
                     lines.append(snippet)
 
         # 同一ファイルの他関数一覧
