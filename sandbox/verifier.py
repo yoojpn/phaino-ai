@@ -199,14 +199,97 @@ class SandboxVerifier:
     Dockerサンドボックスを使ってVulnSampleの脆弱性成立を検証する
 
     フロー:
-      1. LLM生成のペイロード候補を順に試す（最大 MAX_DOCKER_RETRY 回）
-      2. 成功 → Exploitability.CONFIRMED にアップグレード + poc_scriptを保存
-      3. 失敗 → 元の exploitability を維持（変更しない）
-      4. Docker不使用フラグ時はスキップ
+      1. LLMにPoCコードを生成させる
+      2. Dockerで実行
+      3. エラー時はLLMにエラーを渡して修正させ再実行（MAX_DOCKER_RETRY回）
+      4. LLMが「成立不可能」と判断したら INFEASIBLE: <理由> を返させ、theoretical に降格
+      5. 成功 → CONFIRMED
     """
 
-    def __init__(self, docker: Optional[DockerExecutor] = None):
+    def __init__(self, docker: Optional[DockerExecutor] = None, llm_client=None):
         self.docker = docker or DockerExecutor()
+        self._llm = llm_client  # None時は後からVulnAnalyzerのclientを使う
+
+    def _get_llm_client(self):
+        """LLMクライアントを遅延取得"""
+        if self._llm:
+            return self._llm
+        from openai import AsyncOpenAI
+        from config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
+        import os
+        return AsyncOpenAI(
+            base_url=os.getenv("LLM_BASE_URL", LLM_BASE_URL),
+            api_key=LLM_API_KEY,
+        )
+
+    async def _generate_poc(
+        self,
+        sample: VulnSample,
+        last_error: str = "",
+        attempt: int = 0,
+    ) -> str:
+        """
+        LLMにPoCコードを生成（または修正）させる。
+        「INFEASIBLE: <reason>」を返した場合は成立不可と判定する。
+        """
+        client = self._get_llm_client()
+        from config import LLM_MODEL
+        import os
+
+        error_section = ""
+        if last_error:
+            error_section = f"""
+## Previous attempt failed (attempt {attempt})
+Error output:
+```
+{last_error[:600]}
+```
+Fix the PoC to address this error. If you determine exploitation is truly impossible, respond with exactly:
+INFEASIBLE: <reason>
+"""
+
+        prompt = f"""You are writing a PoC exploit for a confirmed vulnerability.
+
+## Vulnerability
+CWE: {sample.label.cwe}
+Attack type: {sample.attack_model.type.value}
+Exploitability: {sample.attack_model.exploitability.value}
+
+## Vulnerable code
+```{sample.language.value}
+{sample.code[:800]}
+```
+
+## Attack scenario
+{chr(10).join(sample.attack_scenario.steps[:5])}
+
+## Data flow
+Source: {sample.analysis.input}
+Sink: {sample.analysis.sink}
+{error_section}
+
+Write a standalone Python or shell PoC script that demonstrates this vulnerability.
+The script must:
+1. Set up the vulnerable code/environment if needed
+2. Send the exploit payload
+3. Print clear evidence of success (e.g., SQL error, command output, file content)
+
+If after analysis you are certain this is NOT exploitable, respond with exactly:
+INFEASIBLE: <one-line reason>
+
+Otherwise, output ONLY the PoC script code, no explanation.
+"""
+        try:
+            resp = await client.chat.completions.create(
+                model=os.getenv("LLM_MODEL", LLM_MODEL),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=800,
+                temperature=0.2,
+                extra_body={"chat_template_kwargs": {"thinking": False}},
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            return f"# PoC generation error: {e}"
 
     async def verify(self, sample: VulnSample) -> VulnSample:
         """
@@ -216,30 +299,55 @@ class SandboxVerifier:
             print(f"    [!] Docker不使用: {_func_name(sample)} → スキップ")
             return sample
 
-        payloads = _extract_payloads(sample)
-        func     = _func_name(sample)
+        func = _func_name(sample)
+        print(f"    [*] LLM PoC生成+検証: {func} ({sample.attack_model.type.value})")
 
-        print(f"    [*] 検証開始: {func} ({sample.attack_model.type.value})")
+        last_error = ""
+        for attempt in range(MAX_DOCKER_RETRY):
+            # LLMにPoC生成（または修正）させる
+            poc_code = await self._generate_poc(sample, last_error, attempt)
 
-        for i, payload in enumerate(payloads[:MAX_DOCKER_RETRY]):
-            print(f"       試行 {i+1}/{min(len(payloads), MAX_DOCKER_RETRY)}: "
-                  f"payload={payload[:60]!r}")
-
-            success, result = await _run_single_verify(self.docker, sample, payload)
-
-            if success:
-                sample.attack_model.exploitability = Exploitability.CONFIRMED
-                # PoCとして成功したペイロード + 実行結果を保存
-                sample.attack_scenario.poc_script = (
-                    f"# Verified payload\n{payload}\n\n"
-                    f"# Output\n{result[:800]}"
-                )
-                print(f"       [✓] confirmed: {result[:120].strip()!r}")
+            # 成立不可能判定
+            if poc_code.startswith("INFEASIBLE:"):
+                reason = poc_code[len("INFEASIBLE:"):].strip()
+                print(f"       [✗] LLMが成立不可能と判断: {reason}")
+                sample.attack_model.exploitability = Exploitability.THEORETICAL
+                sample.attack_scenario.poc_script = f"# INFEASIBLE: {reason}"
                 return sample
 
+            print(f"       試行 {attempt+1}/{MAX_DOCKER_RETRY}: PoCコード生成済み")
+
+            # Dockerで実行
+            try:
+                result = await self.docker.run_script(poc_code, sample.language.value)
+            except AttributeError:
+                # run_scriptがない場合は既存メソッドにフォールバック
+                payloads = _extract_payloads(sample)
+                payload = payloads[attempt] if attempt < len(payloads) else (payloads[0] if payloads else "test")
+                success, result = await _run_single_verify(self.docker, sample, payload)
+                if success:
+                    sample.attack_model.exploitability = Exploitability.CONFIRMED
+                    sample.attack_scenario.poc_script = f"# Verified payload\n{payload}\n\n# Output\n{result[:800]}"
+                    print(f"       [✓] confirmed")
+                    return sample
+                last_error = result
+                continue
+
+            # 成功判定
+            success = _check_success(result, sample.attack_model.type)
+            if success:
+                sample.attack_model.exploitability = Exploitability.CONFIRMED
+                sample.attack_scenario.poc_script = (
+                    f"# LLM-generated PoC (verified)\n{poc_code}\n\n"
+                    f"# Output\n{result[:800]}"
+                )
+                print(f"       [✓] confirmed: {result[:100].strip()!r}")
+                return sample
+
+            last_error = result
             print(f"       [-] 失敗: {result[:80].strip()!r}")
 
-        # 全ペイロードが失敗した場合
+        # 全試行失敗
         print(f"    [-] Docker検証失敗: {func} → exploitability据え置き"
               f" ({sample.attack_model.exploitability.value})")
         return sample

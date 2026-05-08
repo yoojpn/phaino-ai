@@ -7,6 +7,8 @@ OpenAI tool callingで構造化出力を強制
 import os
 import json
 import asyncio
+import re
+from collections import defaultdict
 from typing import List, Optional, Dict
 from openai import AsyncOpenAI
 
@@ -17,6 +19,88 @@ from schema import (
     Exploitability, AttackType, PatchType,
 )
 from parser.ast_parser import FunctionChunk
+
+
+# ===========================
+# 全知コンテキストクラス
+# ===========================
+
+class OmniscientContext:
+    """
+    全チャンクから呼び出しグラフ・クロスファイルコンテキストを構築する。
+    LLMに解析対象コードの「全体像」を与えるために使う。
+    """
+
+    def __init__(self, chunks: List[FunctionChunk]):
+        self.chunks = chunks
+        # 関数名 → チャンク のマップ
+        self.func_map: Dict[str, FunctionChunk] = {}
+        # 呼び出しグラフ: 関数名 → 呼び出す関数名リスト
+        self.call_graph: Dict[str, List[str]] = defaultdict(list)
+        # 被呼び出しグラフ: 関数名 → 呼び出し元関数名リスト
+        self.reverse_graph: Dict[str, List[str]] = defaultdict(list)
+        # ファイル → 関数リスト
+        self.file_funcs: Dict[str, List[str]] = defaultdict(list)
+
+    def build(self):
+        """チャンクリストから呼び出しグラフを構築"""
+        for chunk in self.chunks:
+            self.func_map[chunk.function_name] = chunk
+            self.file_funcs[chunk.file_path].append(chunk.function_name)
+
+        all_func_names = set(self.func_map.keys())
+
+        for chunk in self.chunks:
+            # コード内で参照されている関数名を探す（簡易実装）
+            for name in all_func_names:
+                if name == chunk.function_name:
+                    continue
+                # 関数呼び出しパターン: func_name(
+                if re.search(r'\b' + re.escape(name) + r'\s*\(', chunk.code):
+                    self.call_graph[chunk.function_name].append(name)
+                    self.reverse_graph[name].append(chunk.function_name)
+
+    def get_cross_file_context(self, chunk: FunctionChunk, max_lines: int = 60) -> str:
+        """
+        指定チャンクの呼び出し元・呼び出し先・同一ファイルの関数一覧を返す
+        """
+        lines = []
+        func_name = chunk.function_name
+
+        # 呼び出し元（この関数を使っている関数）
+        callers = self.reverse_graph.get(func_name, [])
+        if callers:
+            lines.append(f"=== Callers of {func_name} ===")
+            for caller in callers[:3]:
+                caller_chunk = self.func_map.get(caller)
+                if caller_chunk:
+                    snippet = caller_chunk.code[:300]
+                    lines.append(f"# {caller} ({caller_chunk.file_path})")
+                    lines.append(snippet)
+
+        # 呼び出し先（この関数が呼ぶ関数）
+        callees = self.call_graph.get(func_name, [])
+        if callees:
+            lines.append(f"=== Callees from {func_name} ===")
+            for callee in callees[:3]:
+                callee_chunk = self.func_map.get(callee)
+                if callee_chunk:
+                    snippet = callee_chunk.code[:300]
+                    lines.append(f"# {callee} ({callee_chunk.file_path})")
+                    lines.append(snippet)
+
+        # 同一ファイルの他関数一覧
+        file_funcs = [f for f in self.file_funcs.get(chunk.file_path, [])
+                      if f != func_name]
+        if file_funcs:
+            lines.append(f"=== Other functions in {chunk.file_path} ===")
+            lines.append(", ".join(file_funcs[:20]))
+
+        result = "\n".join(lines)
+        # 文字数制限
+        if len(result) > max_lines * 80:
+            result = result[:max_lines * 80] + "\n...(truncated)"
+        return result
 
 
 # ===========================
@@ -112,12 +196,20 @@ REPORT_TOOL = {
                     },
                     "required": ["patch_type", "patched_code", "explanation"],
                 },
+                "confidence": {
+                    "type": "integer",
+                    "description": "Confidence score 0-100. 0=definitely false positive, 100=certain exploit. Score below 40 means uncertain.",
+                },
+                "adversarial_check": {
+                    "type": "string",
+                    "description": "Self-challenge: argue why this might NOT be exploitable, then conclude. Required.",
+                },
                 "reason": {
                     "type": "string",
                     "description": "If is_vulnerable=false, explain why there is no real vulnerability",
                 },
             },
-            "required": ["is_vulnerable"],
+            "required": ["is_vulnerable", "confidence", "adversarial_check"],
         },
     },
 }
@@ -127,7 +219,7 @@ REPORT_TOOL = {
 # システムプロンプト
 # ===========================
 SYSTEM_PROMPT = """\
-You are an elite security researcher and penetration tester.
+You are an elite security researcher and penetration tester with omniscient knowledge of the entire codebase.
 Your goal is to find REAL, EXPLOITABLE vulnerabilities for bug bounty reports.
 
 ## Core Rules
@@ -136,6 +228,10 @@ Your goal is to find REAL, EXPLOITABLE vulnerabilities for bug bounty reports.
 3. Only report vulnerabilities where an attack ACTUALLY succeeds
 4. Think as an attacker first, then verify as a defender
 5. You MUST call the report_vulnerability tool with your findings
+6. You MUST fill adversarial_check: argue why this is NOT a vulnerability, then conclude
+7. You MUST assign confidence (0-100): below 40 = false positive territory
+8. Cross-file context is provided — use it to trace data flows across function boundaries
+9. Look for: business logic bugs, TOCTOU, second-order injections, compound auth bypass
 """
 
 
@@ -144,16 +240,6 @@ Your goal is to find REAL, EXPLOITABLE vulnerabilities for bug bounty reports.
 # ===========================
 
 def build_structural_prompt(chunk: FunctionChunk, cross_file: str = "") -> str:
-    codeql_section = ""
-    if chunk.codeql_confirmed:
-        codeql_section = f"""
-## CodeQL Detection
-CodeQL has confirmed a taint flow in this function:
-{chr(10).join(chunk.codeql_flow[:5])}
-
-Analyze WHY this flow is exploitable and design a specific payload.
-"""
-
     return f"""Analyze this {chunk.language} code for security vulnerabilities.
 
 ## File: {chunk.file_path} (lines {chunk.start_line}-{chunk.end_line})
@@ -163,7 +249,6 @@ Analyze WHY this flow is exploitable and design a specific payload.
 {chunk.code}
 ```
 {f"## Cross-file Context{chr(10)}{cross_file}" if cross_file else ""}
-{codeql_section}
 
 ## Analysis Instructions
 
@@ -173,13 +258,14 @@ Analyze WHY this flow is exploitable and design a specific payload.
 **Step 1: Map all data sources**
 What inputs does this function accept?
 - HTTP parameters, headers, cookies, body
-- Function arguments (are they user-controlled?)
+- Function arguments (are they user-controlled from callers above?)
 - File reads, environment variables, database values
 
 **Step 2: Trace every data path**
 Follow each input through ALL transformations:
 - String operations (concat, format, interpolation)
 - Type conversions, conditional branches, function calls
+- Cross-file flows shown in context above
 
 **Step 3: Identify dangerous sinks**
 Where does user-controlled data end up?
@@ -194,8 +280,18 @@ For each source->sink path:
 **Step 5: Think as an attacker**
 What specific payload would you send? What would happen? What would you gain?
 
-**Step 6: Eliminate false positives**
-Under what conditions does this NOT work?
+**Step 6: Adversarial self-check (REQUIRED)**
+Argue why this is NOT exploitable:
+- Is there a framework/middleware handling it?
+- Is the input actually user-controlled?
+- Is the sink actually reachable?
+Then conclude: "Despite this, the vulnerability holds because..." OR "Conclusion: false positive."
+
+**Step 7: Assign confidence score (0-100)**
+- 90-100: Trivially exploitable, clear data flow, no mitigations
+- 70-89: Likely exploitable, minor uncertainty
+- 40-69: Uncertain (→ uncertain report)
+- 0-39: Likely false positive (→ skip)
 
 Call report_vulnerability with your complete findings.
 """
@@ -333,9 +429,11 @@ class VulnAnalyzer:
         self,
         chunks: List[FunctionChunk],
         progress_callback=None,
+        omniscient: Optional["OmniscientContext"] = None,
     ) -> List[VulnSample]:
         """バッチ並列解析"""
         results = []
+        uncertain = []
         total = len(chunks)
 
         for i in range(0, total, BATCH_SIZE):
@@ -343,28 +441,36 @@ class VulnAnalyzer:
 
             tasks = []
             for chunk in batch:
+                cross_file = omniscient.get_cross_file_context(chunk) if omniscient else ""
                 if chunk.language == "php":
                     prompt_type = "php"
-                elif chunk.priority <= 2 and chunk.codeql_confirmed:
-                    prompt_type = "structural"
                 elif chunk.priority >= 5:
                     prompt_type = "attacker"
                 else:
                     prompt_type = "structural"
-                tasks.append(self.analyze_chunk(chunk, prompt_type))
+                tasks.append(self.analyze_chunk(chunk, prompt_type, cross_file=cross_file))
 
             batch_results = await asyncio.gather(*tasks)
             for r in batch_results:
-                if r and r.label.is_vulnerable:
-                    results.append(r)
+                if r is None:
+                    continue
+                conf = r.context.confidence if r.context else 50
+                if r.label.is_vulnerable:
+                    if conf >= 40:
+                        results.append(r)
+                    else:
+                        # confidence低いが脆弱性あり → uncertainリストへ
+                        uncertain.append(r)
 
             done = min(i + BATCH_SIZE, total)
             if progress_callback:
                 await progress_callback(done, total, len(results))
             else:
-                print(f"[*] LLM解析: {done}/{total} | 脆弱性候補: {len(results)}件")
+                print(f"[*] LLM解析: {done}/{total} | 確定候補: {len(results)}件 | 曖昧: {len(uncertain)}件")
 
-        print(f"[+] LLM解析完了: {len(results)}件の脆弱性候補")
+        # uncertainをattributeとして保持（workerがreporterに渡す）
+        self._uncertain = uncertain
+        print(f"[+] LLM解析完了: {len(results)}件の確定候補 / {len(uncertain)}件の曖昧候補")
         return results
 
     async def _call_llm(
@@ -470,6 +576,7 @@ class VulnAnalyzer:
                     codeql_flow=chunk.codeql_flow,
                     is_compound=is_compound,
                     compound_functions=[c.function_name for c in (compound_group or [])],
+                    confidence=int(data.get("confidence", 50)),
                 ),
             )
         except Exception as e:

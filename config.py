@@ -9,23 +9,6 @@ LLM_API_KEY  = os.getenv("LLM_API_KEY", "token-vulnscan")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8000/v1")
 
 # ===========================
-# CodeQL設定
-# ===========================
-CODEQL_PATH     = os.getenv("CODEQL_PATH", "codeql")
-CODEQL_DB_DIR   = os.getenv("CODEQL_DB_DIR", "/tmp/codeql_dbs")
-CODEQL_TIMEOUT  = 300
-
-CODEQL_LANGUAGES = {
-    "python":     "python",
-    "javascript": "javascript",
-    "typescript": "javascript",
-    "java":       "java",
-    "go":         "go",
-    "ruby":       "ruby",
-    "rust":       "rust",
-}
-
-# ===========================
 # スキャン設定
 # ===========================
 LANGUAGE_PRIORITY = {

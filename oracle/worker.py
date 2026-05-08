@@ -2,7 +2,7 @@
 バックグラウンドスキャンワーカー
 
 役割分担：
-  Oracle Free Tier  → 入力取得 / AST解析 / CodeQL / Dockerサンドボックス / レポート生成
+  Oracle Free Tier  → 入力取得 / AST解析 / Dockerサンドボックス / レポート生成
   RunPod RTX 4090   → LLM解析のみ（vLLM + Qwen3.6-27B）
 
 キューからジョブを取り出して順次実行する。
@@ -69,11 +69,10 @@ class ScanWorker:
 
         try:
             # ---- vulnscanモジュールをここでimport（パスが通ってから） ----
-            from config import CODEQL_LANGUAGES, MAX_PARALLEL_DOCKER
+            from config import MAX_PARALLEL_DOCKER
             from input.loader import InputLoader
             from parser.ast_parser import ChunkPipeline
-            from codeql.analyzer import CodeQLAnalyzer
-            from analyzer.llm import VulnAnalyzer
+            from analyzer.llm import VulnAnalyzer, OmniscientContext
             from analyzer.react_loop import ReActLoop
             from sandbox.attacker import DockerExecutor
             from sandbox.verifier import SandboxVerifier
@@ -110,32 +109,20 @@ class ScanWorker:
             self._log(job_id, f"  合計ファイル数: {len(files)} | 言語: {languages}\n")
 
             # ===========================
-            # Step 2: AST解析 + CodeQL（Oracle側・並列）
+            # Step 2: AST解析（Oracle側）
             # ===========================
-            self._log(job_id, "\n[Step 2+3] AST解析 + CodeQL（並列）...\n")
+            self._log(job_id, "\n[Step 2] AST解析...\n")
             ast_pipeline = ChunkPipeline()
-            codeql_analyzer = CodeQLAnalyzer()
+            chunks = ast_pipeline.process(files)
+            self._log(job_id, f"  AST: {len(chunks)}関数\n")
 
-            no_codeql = options.get("no_codeql", False)
-
-            async def run_ast():
-                return ast_pipeline.process(files)
-
-            async def run_codeql():
-                if no_codeql:
-                    return []
-                codeql_langs = [l for l in languages if l in CODEQL_LANGUAGES]
-                if not codeql_langs:
-                    return []
-                return await codeql_analyzer.analyze_multi_language(tmpdir, codeql_langs)
-
-            chunks, codeql_results = await asyncio.gather(run_ast(), run_codeql())
-            self._log(job_id, f"  AST: {len(chunks)}関数 | CodeQL: {len(codeql_results)}件\n")
-
-            if codeql_results:
-                chunks = codeql_analyzer.apply_to_chunks(chunks, codeql_results)
-                confirmed_count = sum(1 for c in chunks if c.codeql_confirmed)
-                self._log(job_id, f"  CodeQL証明済み: {confirmed_count}件\n")
+            # ===========================
+            # Step 3: 全知コンテキスト構築
+            # ===========================
+            self._log(job_id, "\n[Step 3] 全知コンテキスト構築...\n")
+            omniscient = OmniscientContext(chunks)
+            omniscient.build()
+            self._log(job_id, f"  呼び出しグラフ: {len(omniscient.call_graph)}関数\n")
 
             # ===========================
             # Step 3: 複合グループ化（Oracle側）
@@ -169,9 +156,6 @@ class ScanWorker:
                     score += min(lines // 10, 5)
                     branches = len(_re.findall(r'\b(if|for|while|switch|case)\b', code))
                     score += min(branches, 5)
-                    # CodeQL確認済みは最優先
-                    if getattr(chunk, "codeql_confirmed", False):
-                        score += 20
                     return score
 
                 chunks.sort(key=_score, reverse=True)
@@ -180,7 +164,7 @@ class ScanWorker:
                 self._log(job_id, f"  優先度フィルタ: {original_count}関数 → {len(chunks)}関数\n")
 
             compound_groups = _build_compound_groups(chunks)
-            self._log(job_id, f"\n[Step 4.5] 複合グループ: {len(compound_groups)}件\n")
+            self._log(job_id, f"\n[Step 4] 複合グループ: {len(compound_groups)}件\n")
 
             # ===========================
             # Step 4: LLM解析（RunPod起動）
@@ -231,7 +215,7 @@ class ScanWorker:
                 return results
 
             single_results, compound_results = await asyncio.gather(
-                llm_analyzer.analyze_batch(chunks, progress_callback=batch_progress),
+                llm_analyzer.analyze_batch(chunks, progress_callback=batch_progress, omniscient=omniscient),
                 run_compound(),
             )
 
@@ -320,10 +304,12 @@ class ScanWorker:
             job_report_dir.mkdir(parents=True, exist_ok=True)
 
             reporter = ReportGenerator(output_dir=str(job_report_dir))
+            uncertain_samples = getattr(llm_analyzer, "_uncertain", [])
             report_path = reporter.generate(
                 samples=filtered,
                 target=job["target_display"],
                 format="markdown",
+                uncertain_samples=uncertain_samples,
             )
             self._log(job_id, f"  レポート: {report_path}\n")
 

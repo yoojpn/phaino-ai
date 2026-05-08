@@ -19,12 +19,11 @@ from typing import List, Set
 
 from config import (
     MIN_EXPLOITABILITY, REPORT_FORMAT, OUTPUT_DIR,
-    MAX_PARALLEL_DOCKER, CODEQL_LANGUAGES,
+    MAX_PARALLEL_DOCKER,
 )
 from input.loader import InputLoader
 from parser.ast_parser import ChunkPipeline, FunctionChunk
-from codeql.analyzer import CodeQLAnalyzer
-from analyzer.llm import VulnAnalyzer
+from analyzer.llm import VulnAnalyzer, OmniscientContext
 from analyzer.react_loop import ReActLoop
 from sandbox.attacker import DockerExecutor
 from sandbox.verifier import SandboxVerifier
@@ -40,7 +39,6 @@ def parse_args():
     parser.add_argument("--min-exploitability",
                         choices=["theoretical","practical","confirmed"],
                         default=MIN_EXPLOITABILITY)
-    parser.add_argument("--no-codeql",  action="store_true", help="CodeQL無効")
     parser.add_argument("--no-docker",  action="store_true", help="Docker無効")
     parser.add_argument("--no-react",   action="store_true", help="ReActループ無効")
     parser.add_argument("--output-dir", default=OUTPUT_DIR)
@@ -54,7 +52,6 @@ async def run_pipeline(args):
 ║  vulnscan - 脆弱性検出パイプライン       ║
 ╚══════════════════════════════════════════╝
 Target  : {args.target}
-CodeQL  : {'無効' if args.no_codeql else '有効'}
 Docker  : {'無効' if args.no_docker else '有効'}
 ReAct   : {'無効' if args.no_react else '有効'}
 """)
@@ -76,55 +73,38 @@ ReAct   : {'無効' if args.no_react else '有効'}
     print(f"  言語: {languages}")
 
     # ===========================
-    # Step 2+3: AST解析 + CodeQL 並列実行
+    # Step 2: AST解析
     # ===========================
     print("\n" + "=" * 45)
-    print("[Step 2+3] AST解析 + CodeQL taint analysis（並列）")
+    print("[Step 2] AST解析")
     print("=" * 45)
 
-    # リポジトリを一時ディレクトリに保存（CodeQL用）
     tmpdir = tempfile.mkdtemp(prefix="vulnscan_repo_")
     for f in files:
         file_path = Path(tmpdir) / f.path
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(f.content, encoding="utf-8", errors="ignore")
 
-    # 並列実行
     ast_pipeline = ChunkPipeline()
-    codeql_analyzer = CodeQLAnalyzer()
-
-    async def run_ast():
-        return ast_pipeline.process(files)
-
-    async def run_codeql():
-        if args.no_codeql:
-            return []
-        codeql_langs = [l for l in languages if l in CODEQL_LANGUAGES]
-        if not codeql_langs:
-            return []
-        return await codeql_analyzer.analyze_multi_language(tmpdir, codeql_langs)
-
-    chunks, codeql_results = await asyncio.gather(
-        run_ast(),
-        run_codeql(),
-    )
+    chunks = ast_pipeline.process(files)
 
     print(f"\n[+] AST: {len(chunks)}関数")
-    print(f"[+] CodeQL: {len(codeql_results)}件のtaintフロー検出")
 
     # ===========================
-    # Step 4: CodeQL結果を優先度に反映
-    # ===========================
-    if codeql_results:
-        chunks = codeql_analyzer.apply_to_chunks(chunks, codeql_results)
-        codeql_confirmed = sum(1 for c in chunks if c.codeql_confirmed)
-        print(f"[+] CodeQL証明済み関数: {codeql_confirmed}件 → 優先度1に格上げ")
-
-    # ===========================
-    # Step 5: 複合脆弱性グループ化
+    # Step 3: 全知コンテキスト構築
     # ===========================
     print("\n" + "=" * 45)
-    print("[Step 4.5] クロスファイル解析・複合グループ化")
+    print("[Step 3] 全知コンテキスト構築（クロスファイル呼び出しグラフ）")
+    print("=" * 45)
+    omniscient = OmniscientContext(chunks)
+    omniscient.build()
+    print(f"[+] 呼び出しグラフ: {len(omniscient.call_graph)}関数")
+
+    # ===========================
+    # Step 4: 複合脆弱性グループ化
+    # ===========================
+    print("\n" + "=" * 45)
+    print("[Step 4] クロスファイル解析・複合グループ化")
     print("=" * 45)
     compound_groups = _build_compound_groups(chunks)
     print(f"[+] 複合解析グループ: {len(compound_groups)}件")
@@ -137,7 +117,7 @@ ReAct   : {'無効' if args.no_react else '有効'}
     print("=" * 45)
     llm_analyzer = VulnAnalyzer()
 
-    single_task   = llm_analyzer.analyze_batch(chunks)
+    single_task   = llm_analyzer.analyze_batch(chunks, omniscient=omniscient)
     compound_task = llm_analyzer.analyze_compound(compound_groups)
 
     single_results, compound_results = await asyncio.gather(

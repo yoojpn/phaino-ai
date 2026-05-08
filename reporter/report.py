@@ -50,6 +50,7 @@ class ReportGenerator:
         samples: List[VulnSample],
         target: str,
         format: str = "markdown",
+        uncertain_samples: Optional[List[VulnSample]] = None,
     ) -> str:
         """
         脆弱性レポートを生成してファイルに保存する
@@ -97,6 +98,15 @@ class ReportGenerator:
 
         print(f"[+] Markdownレポート : {md_path}")
         print(f"[+] JSONデータ       : {json_path}")
+
+        # Uncertainレポート（confidence 40-64）
+        if uncertain_samples:
+            unc_md = self._build_uncertain_markdown(uncertain_samples, target)
+            unc_md_path = os.path.join(self.output_dir, f"{target_slug}_{timestamp}_uncertain.md")
+            with open(unc_md_path, "w", encoding="utf-8") as f:
+                f.write(unc_md)
+            print(f"[+] 曖昧レポート     : {unc_md_path}")
+
         return md_path
 
     # ===========================
@@ -296,6 +306,66 @@ Sink   : {s.analysis.sink}
 **説明**: {s.fix.explanation}
 
 """
+
+
+    def _build_uncertain_markdown(self, samples: List[VulnSample], target: str) -> str:
+        """confidence 40-64 の曖昧な検出をまとめた別レポート"""
+        if not samples:
+            return f"# Uncertain Findings Report\n\n**Target**: `{target}`\n\n曖昧な検出はありませんでした。\n"
+
+        lines = [
+            f"# Uncertain Findings Report\n",
+            f"| 項目 | 内容 |",
+            f"|------|------|",
+            f"| **Target** | `{target}` |",
+            f"| **日時** | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} |",
+            f"| **曖昧検出数** | {len(samples)} 件 |",
+            f"",
+            f"> ⚠️ これらの検出は confidence 40-64 の範囲にあり、脆弱性である可能性はあるが確信度が低いものです。",
+            f"> 手動での確認を推奨します。",
+            f"",
+            f"---",
+            f"",
+        ]
+
+        for i, s in enumerate(samples, 1):
+            conf = s.context.confidence if s.context else "?"
+            func = s.context.function if s.context else "unknown"
+            file_path = s.context.file if s.context else "unknown"
+            cwe = s.label.cwe or "Unknown"
+            sev = s.label.severity.value.upper() if s.label.severity else "?"
+            flow_str = " → ".join(s.analysis.flow) if s.analysis.flow else "N/A"
+            lines += [
+                f"## Uncertain #{i}: [{sev}] {cwe} — `{func}`",
+                f"",
+                f"| 項目 | 内容 |",
+                f"|------|------|",
+                f"| **Confidence** | {conf}/100 |",
+                f"| **CWE** | {cwe} |",
+                f"| **Attack Type** | {s.attack_model.type.value} |",
+                f"| **ファイル** | `{file_path}` |",
+                f"| **関数** | `{func}` |",
+                f"",
+                f"### 概要",
+                f"",
+                f"{s.reasoning.why_vulnerable}",
+                f"",
+                f"### データフロー",
+                f"",
+                f"```",
+                f"Source : {s.analysis.input}",
+                f"Flow   : {flow_str}",
+                f"Sink   : {s.analysis.sink}",
+                f"```",
+                f"",
+                f"### 誤検知リスク",
+                f"",
+                f"{s.reasoning.false_positive_risk}",
+                f"",
+                f"---",
+                f"",
+            ]
+        return "\n".join(lines)
 
 
 def _slugify(text: str) -> str:

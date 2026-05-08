@@ -112,6 +112,8 @@ class Context:
     # 複合脆弱性
     is_compound: bool = False
     compound_functions: List[str] = field(default_factory=list)
+    # 信頼度スコア（0-100）
+    confidence: int = 50
 
 
 @dataclass
@@ -171,6 +173,7 @@ class VulnSample:
                 "codeql_flow": self.context.codeql_flow,
                 "is_compound": self.context.is_compound,
                 "compound_functions": self.context.compound_functions,
+                "confidence": self.context.confidence,
             } if self.context else None,
         }
 

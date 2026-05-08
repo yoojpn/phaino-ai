@@ -458,6 +458,7 @@ a:hover { color: var(--accent-hover); }
       <div class="job-actions">
         <button class="btn-danger" id="cancel-btn" onclick="cancelJob()" style="display:none">キャンセル</button>
         <a href="#" id="report-link" class="btn-primary" download style="display:none">📄 レポートDL</a>
+        <a href="#" id="uncertain-link" class="btn-secondary" download style="display:none">⚠️ 曖昧レポートDL</a>
       </div>
     </div>
 
@@ -550,6 +551,9 @@ async function loadJob() {
   if (job.status === "done") {
     rl.href = `https://api.phaino-ai.com/api/job/${job.id}/report`;
     rl.style.display = "";
+    const ul = document.getElementById("uncertain-link");
+    ul.href = `https://api.phaino-ai.com/api/job/${job.id}/report/uncertain`;
+    ul.style.display = "";
   }
   if (job.options) {
     let html = `<span>min_exploitability: <strong>${job.options.min_exploitability}</strong></span>`;

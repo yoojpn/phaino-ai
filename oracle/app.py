@@ -155,7 +155,6 @@ async def scan_multi(
     site_urls: str = Form(""),          # 改行区切りのWeb URL群
     files: List[UploadFile] = File([]), # 複数ZIP
     min_exploitability: str = Form("practical"),
-    no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
     max_functions: int = Form(5000),
     no_react: bool = Form(False),
@@ -194,7 +193,6 @@ async def scan_multi(
         target_type="multi",
         target_display=display,
         min_exploitability=min_exploitability,
-        no_codeql=no_codeql,
         no_docker=no_docker,
         max_functions=max_functions,
         no_react=no_react,
@@ -208,7 +206,6 @@ async def scan_github(
     request: Request,
     repo_url: str = Form(...),
     min_exploitability: str = Form("practical"),
-    no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
     max_functions: int = Form(5000),
     no_react: bool = Form(False),
@@ -223,7 +220,6 @@ async def scan_github(
         target=repo_url,
         target_type="github",
         min_exploitability=min_exploitability,
-        no_codeql=no_codeql,
         no_docker=no_docker,
         max_functions=max_functions,
         no_react=no_react,
@@ -236,7 +232,6 @@ async def scan_zip(
     request: Request,
     file: UploadFile = File(...),
     min_exploitability: str = Form("practical"),
-    no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
     max_functions: int = Form(5000),
     no_react: bool = Form(False),
@@ -261,7 +256,6 @@ async def scan_zip(
         target_type="zip",
         target_display=file.filename,
         min_exploitability=min_exploitability,
-        no_codeql=no_codeql,
         no_docker=no_docker,
         max_functions=max_functions,
         no_react=no_react,
@@ -274,7 +268,6 @@ async def scan_web(
     request: Request,
     site_url: str = Form(...),
     min_exploitability: str = Form("practical"),
-    no_codeql: bool = Form(False),
     no_docker: bool = Form(False),
     max_functions: int = Form(5000),
     no_react: bool = Form(False),
@@ -289,7 +282,6 @@ async def scan_web(
         target=site_url,
         target_type="web",
         min_exploitability=min_exploitability,
-        no_codeql=no_codeql,
         no_docker=no_docker,
         max_functions=max_functions,
         no_react=no_react,
@@ -350,6 +342,35 @@ async def api_download_report(request: Request, job_id: str):
     )
 
 
+@app.get("/api/job/{job_id}/report/uncertain")
+async def api_download_uncertain_report(request: Request, job_id: str):
+    """曖昧検出レポートダウンロード（confidence 40-64）"""
+    db: JobDB = request.app.state.db
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "done":
+        raise HTTPException(status_code=400, detail="スキャン完了後にダウンロードできます")
+
+    report_path = job.get("report_path")
+    if not report_path:
+        raise HTTPException(status_code=404, detail="レポートが見つかりません")
+
+    # メインレポートのパスから uncertain パスを生成
+    main_path = Path(report_path)
+    stem = main_path.stem
+    uncertain_path = main_path.parent / f"{stem}_uncertain.md"
+
+    if not uncertain_path.exists():
+        raise HTTPException(status_code=404, detail="曖昧レポートが存在しません（曖昧な検出がありませんでした）")
+
+    return FileResponse(
+        path=str(uncertain_path),
+        filename=uncertain_path.name,
+        media_type="text/markdown",
+    )
+
+
 @app.get("/api/runpod/status")
 async def api_runpod_status(request: Request):
     """RunPodの現在状態"""
@@ -388,7 +409,6 @@ def _create_job(
     target: str,
     target_type: str,
     min_exploitability: str = "practical",
-    no_codeql: bool = False,
     no_docker: bool = False,
     max_functions: int = 5000,
     no_react: bool = False,
@@ -402,7 +422,6 @@ def _create_job(
         target_display=target_display or target,
         options={
             "min_exploitability": min_exploitability,
-            "no_codeql": no_codeql,
             "no_docker": no_docker,
             "max_functions": max_functions,
             "no_react": no_react,

@@ -2,7 +2,7 @@
 パーサーレイヤー - tree-sitter AST解析 + 優先度付け（最新版）
 
 優先度設計（1が最高・10が最低）:
-  1: CodeQL証明済み + source+sink
+  1: source+sink両方あり（最高スコア）
   2: source+sink両方あり（高スコア）
   3〜5: 一般関数
   6〜8: テストコード
@@ -336,7 +336,7 @@ class ChunkPipeline:
     def __init__(self):
         self.parser = ASTParser()
 
-    def process(self, files, codeql_results=None) -> List[FunctionChunk]:
+    def process(self, files) -> List[FunctionChunk]:
         all_chunks = []
         for f in files:
             chunks = self.parser.parse(f.path, f.language, f.content)
@@ -351,19 +351,6 @@ class ChunkPipeline:
                 seen.add(key)
                 unique.append(c)
 
-        # CodeQL結果を優先度0に反映
-        if codeql_results:
-            codeql_lines = {
-                (r.file.split("/")[-1], r.start_line): r.rule_id
-                for r in codeql_results
-            }
-            for c in unique:
-                fname = c.file_path.split("/")[-1]
-                for (f, line), rule in codeql_lines.items():
-                    if f == fname and c.start_line <= line <= c.end_line:
-                        c.priority = 0
-                        c.priority_reason = f"CodeQL証明済み: {rule} (line {line})"
-                        break
         unique.sort(key=lambda x: x.priority)
 
         dist    = {}
