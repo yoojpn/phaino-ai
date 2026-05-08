@@ -42,7 +42,7 @@ CPU_POD_IMAGE       = os.getenv("CPU_POD_IMAGE", "python:3.11-slim")
 CPU_POD_DISK_SIZE   = int(os.getenv("CPU_POD_DISK_SIZE", "20"))
 CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "300"))
 # 8vCPUs 16GB RAM $0.28/hr に対応するRunPodのCPUタイプ
-CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c-8-16")  # 8vCPU, 16GB
+CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c")  # 有効値: cpu3c/cpu3g/cpu3m/cpu5c/cpu5g/cpu5m
 CPU_POD_START_CMD   = os.getenv(
     "CPU_POD_START_CMD",
     "bash /workspace/vulnscan/scripts/cpu_pod_start.sh"
