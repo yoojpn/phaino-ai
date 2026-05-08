@@ -473,7 +473,6 @@ a:hover { color: var(--accent-hover); }
               <option value="theoretical">theoretical 以上（全件）</option>
             </select>
           </label>
-          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
           <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
@@ -501,7 +500,6 @@ a:hover { color: var(--accent-hover); }
               <option value="theoretical">theoretical 以上（全件）</option>
             </select>
           </label>
-          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
           <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
@@ -525,7 +523,6 @@ a:hover { color: var(--accent-hover); }
               <option value="theoretical">theoretical 以上（全件）</option>
             </select>
           </label>
-          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
           <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
@@ -554,7 +551,6 @@ a:hover { color: var(--accent-hover); }
               <option value="theoretical">theoretical 以上（全件）</option>
             </select>
           </label>
-          <label><input type="checkbox" name="no_codeql"> CodeQL無効</label>
           <label><input type="checkbox" name="no_docker"> Docker無効</label>
           <label>上限関数数: <input type="number" name="max_functions" min="0" value="5000" style="width:80px"> (0=無制限)</label>
           <label><input type="checkbox" name="no_react"> ReActループ無効</label>
@@ -647,7 +643,7 @@ async function submitForm(formId, endpoint, isMultipart) {
     try {
       const fd = new FormData(form);
       // チェックボックスをboolに変換
-      ["no_codeql","no_docker","no_react"].forEach(key => {
+      ["no_docker","no_react"].forEach(key => {
         fd.set(key, form.querySelector(`[name=${key}]`).checked ? "true" : "false");
       });
       const maxFn = form.querySelector('[name=max_functions]');
