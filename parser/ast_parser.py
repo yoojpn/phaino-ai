@@ -240,20 +240,55 @@ class ASTParser:
 
         # taint source/sink パターン（変数名レベルで追跡）
         SOURCE_CALL_PATTERNS = re.compile(
+            # Python/Flask
             r"request\.|req\.|flask\.request|request\.form|request\.args|"
             r"request\.json|request\.get_json|request\.data|"
-            r"\$_GET|\$_POST|\$_REQUEST|getParameter|getHeader|getCookie|"
-            r"req\.body|req\.query|req\.params|formData|"
-            r"sys\.argv|os\.environ|input\s*\(",
+            r"sys\.argv|os\.environ|input\s*\(|"
+            # PHP
+            r"\$_GET|\$_POST|\$_REQUEST|\$_COOKIE|\$_FILES|\$_SERVER|"
+            # Java Servlet / Spring
+            r"getParameter\s*\(|getParameterValues\s*\(|getHeader\s*\(|"
+            r"getCookies\s*\(|getQueryString\s*\(|getInputStream\s*\(|"
+            r"getReader\s*\(|getPart\s*\(|getAttribute\s*\(|"
+            r"@RequestParam|@RequestBody|@PathVariable|@RequestHeader|"
+            r"@ModelAttribute|HttpServletRequest|ServletRequest|"
+            r"request\.getParameter|request\.getHeader|request\.getCookie|"
+            # JS/Node
+            r"req\.body|req\.query|req\.params|req\.headers|"
+            r"formData|process\.env|document\.location|window\.location|"
+            r"document\.URL|document\.referrer",
             re.IGNORECASE
         )
         SINK_CALL_PATTERNS = re.compile(
-            r"execute\s*\(|cursor\.|\.query\s*\(|mysql_query|pg_query|"
-            r"os\.system\s*\(|subprocess\.|exec\s*\(|eval\s*\(|"
+            # SQL
+            r"execute\s*\(|executeQuery\s*\(|executeUpdate\s*\(|"
+            r"prepareStatement\s*\(|createStatement\s*\(|"
+            r"cursor\.|\.query\s*\(|mysql_query|pg_query|"
+            r"nativeQuery|createNativeQuery\s*\(|createQuery\s*\(|"
+            # OS Command
+            r"os\.system\s*\(|subprocess\.|exec\s*\(|"
+            r"Runtime\.getRuntime|ProcessBuilder|"
+            r"Runtime\s*\.\s*exec|process\.exec|child_process|"
+            # Code eval
+            r"eval\s*\(|ScriptEngine|groovy\.lang\.Script|"
+            r"GroovyShell|ClassLoader|loadClass\s*\(|"
+            # Deserialization
             r"pickle\.loads|yaml\.load\s*\(|marshal\.loads|"
-            r"open\s*\(|readFile|writeFile|include\s*\(|require\s*\(|"
+            r"ObjectInputStream|readObject\s*\(|XMLDecoder|"
+            r"XStream\.fromXML|JSON\.parse\s*\(|"
+            # File
+            r"open\s*\(|readFile|writeFile|Files\.write|Files\.read|"
+            r"new\s+File\s*\(|FileInputStream|FileOutputStream|"
+            r"include\s*\(|require\s*\(|"
+            # XSS
             r"innerHTML|document\.write|render_template_string|Template\s*\(|"
-            r"requests\.get|requests\.post|urllib\.request|fetch\s*\(",
+            r"response\.getWriter|PrintWriter|out\.print|out\.write|"
+            r"getWriter\s*\(\.\s*write|Model\.addAttribute|"
+            r"ModelAndView|ResponseBody|"
+            # SSRF / redirect
+            r"requests\.get|requests\.post|urllib\.request|fetch\s*\(|"
+            r"HttpURLConnection|URL\s*\(\.\s*openConnection|"
+            r"response\.sendRedirect|redirect\s*\(",
             re.IGNORECASE
         )
 
