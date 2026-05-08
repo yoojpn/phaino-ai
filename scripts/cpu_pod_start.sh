@@ -7,16 +7,18 @@ set -e
 echo "[CPU Worker] 起動開始..."
 
 # 依存インストール
-pip install -q \
-    fastapi \
-    uvicorn \
-    tree-sitter==0.21.3 \
-    tree-sitter-languages==1.10.2 \
-    PyGithub>=2.3.0 \
-    beautifulsoup4>=4.12.0 \
-    requests>=2.31.0 \
-    httpx \
-    pydantic
+pip install -q fastapi uvicorn PyGithub beautifulsoup4 requests httpx pydantic
+
+# tree-sitter-languagesは強制reinstall（バージョン競合回避）
+pip install -q --force-reinstall --no-deps tree-sitter==0.21.3
+pip install -q --force-reinstall --no-deps tree-sitter-languages==1.10.2
+
+# インストール確認
+python3 -c "from tree_sitter_languages import get_parser; get_parser('java'); print('[CPU Worker] tree_sitter_languages OK')" || {
+    echo "[CPU Worker] tree_sitter_languages失敗、再試行..."
+    pip install --force-reinstall tree-sitter==0.21.3 tree-sitter-languages==1.10.2
+    python3 -c "from tree_sitter_languages import get_parser; print('[CPU Worker] tree_sitter_languages OK (retry)')"
+}
 
 echo "[CPU Worker] pip install完了"
 
