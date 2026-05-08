@@ -35,6 +35,193 @@ POD_GPU_TYPE   = os.getenv("RUNPOD_GPU_TYPE", "NVIDIA GeForce RTX 4090")
 POD_DISK_SIZE  = int(os.getenv("RUNPOD_DISK_SIZE", "40"))
 POD_START_CMD  = os.getenv("RUNPOD_START_CMD", "bash /workspace/vulnscan/scripts/runpod_start.sh")
 
+# CPUポッド設定（AST解析・taint伝播用）
+CPU_POD_NAME        = os.getenv("CPU_POD_NAME", "vulnscan-cpu")
+CPU_POD_PORT        = int(os.getenv("CPU_POD_PORT", "8001"))
+CPU_POD_IMAGE       = os.getenv("CPU_POD_IMAGE", "python:3.11-slim")
+CPU_POD_DISK_SIZE   = int(os.getenv("CPU_POD_DISK_SIZE", "20"))
+CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "300"))
+# 8vCPUs 16GB RAM $0.28/hr に対応するRunPodのCPUタイプ
+CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c-8-16")  # 8vCPU, 16GB
+CPU_POD_START_CMD   = os.getenv(
+    "CPU_POD_START_CMD",
+    "bash /workspace/vulnscan/scripts/cpu_pod_start.sh"
+)
+
+
+class CpuPodManager:
+    """
+    AST解析・多段taint伝播用CPUポッドの管理。
+    8vCPUs / 16GB RAM / $0.28/hr のCPUポッドを使う。
+    """
+
+    def __init__(self):
+        self.api_key = RUNPOD_API_KEY
+        self._pod_id: Optional[str] = None
+        self._pod_ip: Optional[str] = None
+        self._lock = asyncio.Lock()
+
+    def _worker_url(self) -> Optional[str]:
+        if self._pod_ip:
+            if "proxy.runpod.net" in str(self._pod_ip):
+                return f"https://{self._pod_ip}"
+            return f"http://{self._pod_ip}:{CPU_POD_PORT}"
+        return None
+
+    async def start_pod(self) -> str:
+        """CPUポッドを起動してworker URLを返す"""
+        async with self._lock:
+            url = self._worker_url()
+            if url and await self._check_health(url):
+                return url
+
+            # 既存podを探す
+            pod_id = await self._resolve_pod_id()
+            if pod_id:
+                try:
+                    await self._resume_pod(pod_id)
+                    await self._wait_for_ip(pod_id)
+                    return await self._wait_for_health()
+                except Exception as e:
+                    logger.warning(f"[CPU] resume失敗: {e} → 新規作成")
+                    try:
+                        await self._delete_pod(self._pod_id)
+                    except Exception:
+                        pass
+                    self._pod_id = None
+
+            # 新規作成
+            logger.info("[CPU] CPUポッド新規作成中...")
+            new_id = await self._create_pod()
+            self._pod_id = new_id
+            await self._wait_for_ip(new_id)
+            return await self._wait_for_health()
+
+    async def stop_pod(self):
+        pod_id = self._pod_id or await self._resolve_pod_id()
+        if pod_id:
+            logger.info(f"[CPU] CPUポッド停止: {pod_id}")
+            await self._delete_pod(pod_id)
+        self._pod_id = None
+        self._pod_ip = None
+
+    async def _resolve_pod_id(self) -> Optional[str]:
+        env_id = os.getenv("CPU_POD_ID", "")
+        if env_id:
+            self._pod_id = env_id
+            return env_id
+        query = """
+        query Pods {
+            myself { pods { id name desiredStatus } }
+        }
+        """
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                RUNPOD_API_BASE,
+                json={"query": query},
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            pods = resp.json().get("data", {}).get("myself", {}).get("pods", [])
+        for pod in pods:
+            if CPU_POD_NAME.lower() in (pod.get("name") or "").lower():
+                self._pod_id = pod["id"]
+                return pod["id"]
+        return None
+
+    async def _wait_for_ip(self, pod_id: str):
+        self._pod_ip = f"{pod_id}-{CPU_POD_PORT}.proxy.runpod.net"
+        logger.info(f"[CPU] プロキシURL: https://{self._pod_ip}")
+
+    async def _wait_for_health(self) -> str:
+        url = self._worker_url()
+        deadline = asyncio.get_event_loop().time() + CPU_POD_HEALTH_TIMEOUT
+        while asyncio.get_event_loop().time() < deadline:
+            if await self._check_health(url):
+                logger.info("[CPU] CPUワーカー ready")
+                return url
+            await asyncio.sleep(5)
+        raise RuntimeError("CPUワーカー起動タイムアウト")
+
+    async def _check_health(self, base_url: str) -> bool:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{base_url}/health", timeout=5, follow_redirects=True
+                )
+                return resp.status_code == 200
+        except Exception:
+            return False
+
+    async def _resume_pod(self, pod_id: str):
+        mutation = """
+        mutation ResumePod($input: PodResumeInput!) {
+            podResume(input: $input) { id desiredStatus }
+        }
+        """
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                RUNPOD_API_BASE,
+                json={"query": mutation,
+                      "variables": {"input": {"podId": pod_id}}},
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("errors"):
+                raise RuntimeError(f"podResume error: {data['errors']}")
+
+    async def _create_pod(self) -> str:
+        """CPUポッドを新規作成（RunPod CPU Pod API）"""
+        payload = {
+            "name": CPU_POD_NAME,
+            "imageName": CPU_POD_IMAGE,
+            "podType": "CPU",
+            "cpuFlavorId": CPU_POD_TYPE,
+            "containerDiskInGb": CPU_POD_DISK_SIZE,
+            "ports": [f"{CPU_POD_PORT}/http"],
+            "startSsh": False,
+            "dockerStartCmd": CPU_POD_START_CMD,
+            "env": {
+                "VULNSCAN_ROOT": "/workspace/vulnscan",
+                "CPU_POD_PORT": str(CPU_POD_PORT),
+                "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN", ""),
+            },
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://rest.runpod.io/v1/pods",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=30,
+            )
+            data = resp.json()
+            if resp.status_code in (200, 201) and isinstance(data, dict) and data.get("id"):
+                logger.info(f"[CPU] ポッド作成成功: {data['id']}")
+                return data["id"]
+            raise RuntimeError(f"CPUポッド作成失敗: {data}")
+
+    async def _delete_pod(self, pod_id: str):
+        mutation = """
+        mutation TerminatePod($input: PodTerminateInput!) {
+            podTerminate(input: $input)
+        }
+        """
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                RUNPOD_API_BASE,
+                json={"query": mutation,
+                      "variables": {"input": {"podId": pod_id}}},
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+
 
 class RunPodManager:
 

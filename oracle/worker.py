@@ -13,9 +13,7 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -30,12 +28,17 @@ sys.path.insert(0, str(VULNSCAN_ROOT))
 class ScanWorker:
     """
     ジョブキューを監視してスキャンを実行するワーカー。
-    1ジョブずつ順番に処理する（Oracle ARM 4コアの限界を考慮）。
+
+    処理フロー:
+      CPUポッド → git clone / AST解析 / 多段taint伝播
+      A40ポッド → LLM解析
+      Oracle    → サンドボックス検証 / レポート生成
     """
 
-    def __init__(self, db, manager, report_dir: Path):
+    def __init__(self, db, manager, cpu_manager, report_dir: Path):
         self.db = db
-        self.manager = manager
+        self.manager = manager          # GPU (A40) manager
+        self.cpu_manager = cpu_manager  # CPU pod manager
         self.report_dir = report_dir
         self._current_job_id: Optional[str] = None
 
@@ -68,72 +71,101 @@ class ScanWorker:
         self._log(job_id, f"[{datetime.utcnow().isoformat()}] ジョブ開始: {job['target_display']}\n")
 
         try:
-            # ---- vulnscanモジュールをここでimport（パスが通ってから） ----
-            from config import MAX_PARALLEL_DOCKER
-            from input.loader import InputLoader
-            from parser.ast_parser import ChunkPipeline
+            import httpx as _httpx
+
             from analyzer.llm import VulnAnalyzer, OmniscientContext
             from analyzer.react_loop import ReActLoop
+            from analyzer.compound import build_compound_groups
             from sandbox.attacker import DockerExecutor
             from sandbox.verifier import SandboxVerifier
             from reporter.report import ReportGenerator
+            from parser.ast_parser import FunctionChunk
             from schema import VulnSample, Exploitability, Severity
+            from config import MAX_PARALLEL_DOCKER
 
             # ===========================
-            # Step 1: 入力取得（Oracle側）
+            # Step 1-3: CPUポッドで実行
+            # (git clone / AST / 多段taint伝播)
             # ===========================
-            self._log(job_id, "\n[Step 1] コード取得...\n")
-            loader = InputLoader()
+            self._log(job_id, "\n[Step 1-3] CPUポッド起動中...\n")
+            cpu_url = await self.cpu_manager.start_pod()
+            self._log(job_id, f"  CPUポッド ready: {cpu_url}\n")
 
-            # multi ターゲット対応
-            if target_type == "multi":
-                import json as _json
-                target_list = _json.loads(target)
-            else:
-                target_list = [{"type": target_type, "value": target, "display": target}]
+            self._log(job_id, "  git clone / AST解析 / 多段taint伝播 実行中...\n")
+            async with _httpx.AsyncClient(timeout=1800) as client:
+                resp = await client.post(
+                    f"{cpu_url}/analyze",
+                    json={
+                        "target": target,
+                        "target_type": target_type,
+                        "options": options,
+                    },
+                )
+                resp.raise_for_status()
+                result = resp.json()
 
-            files = []
-            tmpdir = tempfile.mkdtemp(prefix="vulnscan_")
-            for t in target_list:
-                self._log(job_id, f"  取得中: {t['display']}\n")
-                t_files = loader.load(t["value"])
-                files.extend(t_files)
-                for f in t_files:
-                    fp = Path(tmpdir) / f.path
-                    fp.parent.mkdir(parents=True, exist_ok=True)
-                    fp.write_text(f.content, encoding="utf-8", errors="ignore")
+            # CPUポッドは解析完了後すぐ停止（課金節約）
+            await self.cpu_manager.stop_pod()
+            self._log(job_id, "  CPUポッド停止\n")
 
-            if not files:
-                raise ValueError("コードファイルが見つかりません")
-            languages = {f.language for f in files}
-            self._log(job_id, f"  合計ファイル数: {len(files)} | 言語: {languages}\n")
+            if result.get("error"):
+                raise ValueError(f"CPUワーカーエラー: {result['error']}")
 
-            # ===========================
-            # Step 2: AST解析（Oracle側）
-            # ===========================
-            self._log(job_id, "\n[Step 2] AST解析...\n")
-            ast_pipeline = ChunkPipeline()
-            chunks = ast_pipeline.process(files)
-            self._log(job_id, f"  AST: {len(chunks)}関数\n")
+            # CPUポッドの結果からFunctionChunkを復元
+            raw_chunks = result["chunks"]
+            call_graph  = result["call_graph"]
+            reverse_graph = result["reverse_graph"]
+            taint_summary = result["taint_summary"]
+            file_count = result["file_count"]
 
-            # ===========================
-            # Step 3: 全知コンテキスト構築
-            # ===========================
-            self._log(job_id, "\n[Step 3] 全知コンテキスト構築...\n")
+            self._log(
+                job_id,
+                f"  ファイル数: {file_count} | "
+                f"関数数: {len(raw_chunks)} | "
+                f"汚染関数: {taint_summary.get('tainted_functions', 0)} | "
+                f"source→sink: {taint_summary.get('source_sink_pairs', 0)}件\n"
+            )
+
+            # dictからFunctionChunkに復元
+            chunks = []
+            for r in raw_chunks:
+                c = FunctionChunk(
+                    file_path=r["file_path"],
+                    language=r["language"],
+                    function_name=r["function_name"],
+                    code=r["code"],
+                    start_line=r["start_line"],
+                    end_line=r["end_line"],
+                    priority=r["priority"],
+                    priority_reason=r["priority_reason"],
+                    calls=r["calls"],
+                    params=r["params"],
+                    taint_sources=r["taint_sources"],
+                    taint_sinks=r["taint_sinks"],
+                )
+                # 多段taint伝播結果を付与
+                c.propagated_sources = r.get("propagated_sources", [])
+                c.taint_paths = r.get("taint_paths", [])
+                chunks.append(c)
+
+            # OmniscientContextをOracle側で再構築（call_graphはCPUポッドから受け取ったものを使用）
             omniscient = OmniscientContext(chunks)
-            omniscient.build()
-            self._log(job_id, f"  呼び出しグラフ: {len(omniscient.call_graph)}関数\n")
+            omniscient.call_graph = {k: v for k, v in call_graph.items()}
+            omniscient.reverse_graph = {k: v for k, v in reverse_graph.items()}
+            omniscient.func_map = {c.function_name: c for c in chunks}
+            from collections import defaultdict
+            omniscient.file_funcs = defaultdict(list)
+            for c in chunks:
+                omniscient.file_funcs[c.file_path].append(c.function_name)
+
+            self._log(job_id, f"  呼び出しグラフ: {len([v for v in call_graph.values() if v])}関数\n")
 
             # ===========================
-            # Step 3: 複合グループ化（Oracle側）
-            # ===========================
-            # ===========================
-            # 優先度フィルタ（max_functions指定時）
+            # 優先度フィルタ
             # ===========================
             max_functions = options.get("max_functions", 0)
             if max_functions and max_functions > 0:
                 import re as _re
-
                 SINK_PATTERNS = [
                     "memcpy", "memmove", "memset", "strcpy", "strcat", "sprintf",
                     "malloc", "realloc", "free", "alloca", "new ", "delete ",
@@ -144,18 +176,16 @@ class ScanWorker:
                 def _score(chunk):
                     score = 0
                     code = chunk.code.lower()
-                    # sinkキーワード
                     for kw in SINK_PATTERNS:
                         if kw in code:
                             score += 3
-                    # ポインタ・サイズ引数（入力受取の可能性）
                     if _re.search(r'\b(char\s*\*|void\s*\*|uint8_t\s*\*|size_t|len|length|size|count)', code):
                         score += 2
-                    # 関数の複雑度（行数・分岐数）
-                    lines = code.count("\n")
-                    score += min(lines // 10, 5)
-                    branches = len(_re.findall(r'\b(if|for|while|switch|case)\b', code))
-                    score += min(branches, 5)
+                    score += min(code.count("\n") // 10, 5)
+                    score += min(len(_re.findall(r'\b(if|for|while|switch|case)\b', code)), 5)
+                    # 多段taint伝播でsource→sink確認済みは最優先
+                    if getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks:
+                        score += 20
                     return score
 
                 chunks.sort(key=_score, reverse=True)
@@ -167,13 +197,12 @@ class ScanWorker:
             self._log(job_id, f"\n[Step 4] 複合グループ: {len(compound_groups)}件\n")
 
             # ===========================
-            # Step 4: LLM解析（RunPod起動）
+            # Step 4: LLM解析（A40起動）
             # ===========================
-            self._log(job_id, "\n[Step 5] LLM解析 - RunPod起動中...\n")
+            self._log(job_id, "\n[Step 5] LLM解析 - A40起動中...\n")
             vllm_url = await self.manager.start_pod()
             self._log(job_id, f"  vLLM URL: {vllm_url}\n")
 
-            # LLM_BASE_URLをRunPodのURLに動的上書き
             os.environ["LLM_BASE_URL"] = vllm_url
 
             llm_analyzer = VulnAnalyzer()
@@ -182,11 +211,11 @@ class ScanWorker:
             total_funcs    = total_single + total_compound
             self._log(job_id, f"  LLM: 0/{total_funcs} 関数完了 | 脆弱性候補: 0件\n")
 
-            counter_lock    = asyncio.Lock()
-            single_done     = [0]
-            single_vulns    = [0]
-            compound_done   = [0]
-            compound_vulns  = [0]
+            counter_lock   = asyncio.Lock()
+            single_done    = [0]
+            single_vulns   = [0]
+            compound_done  = [0]
+            compound_vulns = [0]
 
             async def _log_progress():
                 done  = single_done[0] + compound_done[0]
@@ -205,7 +234,9 @@ class ScanWorker:
                 for group in compound_groups:
                     from analyzer.llm import build_compound_prompt
                     prompt = build_compound_prompt(group)
-                    r = await llm_analyzer._call_llm(prompt, group[0], is_compound=True, compound_group=group)
+                    r = await llm_analyzer._call_llm(
+                        prompt, group[0], is_compound=True, compound_group=group
+                    )
                     async with counter_lock:
                         compound_done[0] += 1
                         if r and r.label.is_vulnerable:
@@ -215,27 +246,30 @@ class ScanWorker:
                 return results
 
             single_results, compound_results = await asyncio.gather(
-                llm_analyzer.analyze_batch(chunks, progress_callback=batch_progress, omniscient=omniscient),
+                llm_analyzer.analyze_batch(
+                    chunks, progress_callback=batch_progress, omniscient=omniscient
+                ),
                 run_compound(),
             )
 
             all_vulns: List[VulnSample] = single_results + compound_results
             self._log(
                 job_id,
-                f"  脆弱性候補: {len(all_vulns)}件 (単一:{len(single_results)} 複合:{len(compound_results)})\n",
+                f"  脆弱性候補: {len(all_vulns)}件 "
+                f"(単一:{len(single_results)} 複合:{len(compound_results)})\n",
             )
 
-            # Step 5完了後はPodをそのまま維持（Step 8で再利用）
-
             # ===========================
-            # Step 6: Dockerサンドボックス検証（Oracle側）
+            # Step 5: Dockerサンドボックス検証
             # ===========================
             no_docker = options.get("no_docker", False)
             if not no_docker and all_vulns:
                 self._log(job_id, "\n[Step 7] Dockerサンドボックス検証...\n")
                 docker = DockerExecutor()
                 verifier = SandboxVerifier(docker)
-                all_vulns = await verifier.verify_batch(all_vulns, concurrency=MAX_PARALLEL_DOCKER)
+                all_vulns = await verifier.verify_batch(
+                    all_vulns, concurrency=MAX_PARALLEL_DOCKER
+                )
                 confirmed = sum(
                     1 for s in all_vulns
                     if s.attack_model.exploitability == Exploitability.CONFIRMED
@@ -243,7 +277,7 @@ class ScanWorker:
                 self._log(job_id, f"  confirmed: {confirmed}件\n")
 
             # ===========================
-            # Step 7: ReActループ（Oracle側）
+            # Step 6: ReActループ
             # ===========================
             no_react = options.get("no_react", False)
             if not no_react:
@@ -260,15 +294,15 @@ class ScanWorker:
                     react_loop = ReActLoop(docker)
                     react_tasks = [react_loop.run(s) for s in react_targets]
                     react_results = await asyncio.gather(*react_tasks)
-
                     react_ids = {id(s) for s in react_targets}
-                    all_vulns = [s for s in all_vulns if id(s) not in react_ids] + list(react_results)
-
-                    # 再停止
+                    all_vulns = (
+                        [s for s in all_vulns if id(s) not in react_ids]
+                        + list(react_results)
+                    )
                     await self.manager.stop_pod()
 
             # ===========================
-            # Step 8: フィルタ
+            # Step 7: フィルタ
             # ===========================
             min_exp = options.get("min_exploitability", "practical")
             exp_order = {
@@ -292,12 +326,12 @@ class ScanWorker:
             filtered = [
                 s for s in all_vulns
                 if exp_order.get(s.attack_model.exploitability, 0) >= min_level
-                and not _is_test_path(s.context.file)
+                and not _is_test_path(s.context.file if s.context else "")
             ]
             self._log(job_id, f"\n[Step 9] フィルタ後: {len(filtered)}件\n")
 
             # ===========================
-            # Step 9: レポート生成（Oracle側）
+            # Step 8: レポート生成
             # ===========================
             self._log(job_id, "\n[Step 10] レポート生成...\n")
             job_report_dir = self.report_dir / job_id
@@ -313,19 +347,24 @@ class ScanWorker:
             )
             self._log(job_id, f"  レポート: {report_path}\n")
 
-            # クリーンアップ
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
             # ===========================
             # 完了
             # ===========================
             summary = {
-                "files": len(files),
+                "files": file_count,
                 "functions": len(chunks),
+                "tainted_functions": taint_summary.get("tainted_functions", 0),
+                "source_sink_pairs": taint_summary.get("source_sink_pairs", 0),
                 "total_vulns": len(all_vulns),
                 "reported": len(filtered),
-                "confirmed": sum(1 for s in filtered if s.attack_model.exploitability == Exploitability.CONFIRMED),
-                "practical": sum(1 for s in filtered if s.attack_model.exploitability == Exploitability.PRACTICAL),
+                "confirmed": sum(
+                    1 for s in filtered
+                    if s.attack_model.exploitability == Exploitability.CONFIRMED
+                ),
+                "practical": sum(
+                    1 for s in filtered
+                    if s.attack_model.exploitability == Exploitability.PRACTICAL
+                ),
             }
             self.db.update_job(
                 job_id,
@@ -340,11 +379,12 @@ class ScanWorker:
             raise
         except Exception as e:
             logger.exception(f"Job {job_id} failed: {e}")
-            # RunPodが起きたままになってないか確認して停止
-            try:
-                await self.manager.stop_pod()
-            except Exception:
-                pass
+            # 両ポッドが起きたままにならないよう停止
+            for mgr in (self.cpu_manager, self.manager):
+                try:
+                    await mgr.stop_pod()
+                except Exception:
+                    pass
             self.db.update_job(
                 job_id,
                 status="error",

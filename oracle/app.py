@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from oracle.db import JobDB
-from oracle.runpod_manager import RunPodManager
+from oracle.runpod_manager import RunPodManager, CpuPodManager
 from oracle.worker import ScanWorker
 
 # ===========================
@@ -53,8 +53,9 @@ async def lifespan(app: FastAPI):
     db = JobDB()
     db.init()
 
-    manager = RunPodManager()
-    worker = ScanWorker(db=db, manager=manager, report_dir=REPORT_DIR)
+    manager     = RunPodManager()
+    cpu_manager = CpuPodManager()
+    worker = ScanWorker(db=db, manager=manager, cpu_manager=cpu_manager, report_dir=REPORT_DIR)
 
     # バックグラウンドワーカー起動
     task = asyncio.create_task(worker.run_forever())
