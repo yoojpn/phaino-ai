@@ -178,11 +178,11 @@ class CpuPodManager:
         payload = {
             "name": CPU_POD_NAME,
             "imageName": CPU_POD_IMAGE,
-            "podType": "CPU",
-            "cpuFlavorId": CPU_POD_TYPE,
+            "cloudType": "COMMUNITY",
+            "computeType": "CPU",
+            "cpuFlavorIds": [CPU_POD_TYPE],
             "containerDiskInGb": CPU_POD_DISK_SIZE,
             "ports": [f"{CPU_POD_PORT}/http"],
-            "startSsh": False,
             "dockerStartCmd": CPU_POD_START_CMD.split() if isinstance(CPU_POD_START_CMD, str) else CPU_POD_START_CMD,
             "env": {
                 "VULNSCAN_ROOT": "/workspace/vulnscan",
