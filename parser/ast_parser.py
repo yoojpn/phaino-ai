@@ -204,6 +204,13 @@ class ASTParser:
                                 if sub.type == "identifier":
                                     params.append(node_text(sub))
                                     break
+                        elif param.type in ("formal_parameter", "spread_parameter"):
+                            # Java: modifiers? type_identifier identifier
+                            # 最後の identifier が変数名
+                            ids = [sub for sub in param.children
+                                   if sub.type == "identifier"]
+                            if ids:
+                                params.append(node_text(ids[-1]))
             return params
 
         def extract_calls(func_node) -> List[str]:
@@ -310,20 +317,32 @@ class ASTParser:
                 r"(\w+)\s*=\s*(?:.*?)" + SOURCE_CALL_PATTERNS.pattern,
                 code, re.IGNORECASE
             ):
-                sources.add(m.group(1))
+                if m.group(1):
+                    sources.add(m.group(1))
 
             # パラメータ自体も source 候補（呼び出し元から汚染データが来る可能性）
             for p in params:
-                sources.add(p)
+                if p:
+                    sources.add(p)
 
-            # sink に変数が渡っているかチェック
+            # sink に渡っている引数変数を検出
+            # パターン: sinkメソッド名(... var ...) の形を探す
             for m in re.finditer(
-                SINK_CALL_PATTERNS.pattern + r"[^)]*?(\w+)[^)]*?\)",
+                r"(?:" + SINK_CALL_PATTERNS.pattern + r")\s*\(([^)]{0,200})\)",
                 code, re.IGNORECASE
             ):
-                var = m.group(1) if m.lastindex else None
-                if var and (var in sources or len(var) > 1):
-                    sinks.add(var)
+                args_str = m.group(m.lastindex) if m.lastindex else ""
+                for var in re.findall(r"\b(\w+)\b", args_str):
+                    if var and len(var) > 1 and not var[0].isupper():
+                        sinks.add(var)
+
+            # source変数がsinkに使われているかも追加チェック（文字列連結など）
+            for src in list(sources):
+                if src and re.search(
+                    r"(?:" + SINK_CALL_PATTERNS.pattern + r")[^;]*\b" + re.escape(src) + r"\b",
+                    code, re.IGNORECASE
+                ):
+                    sinks.add(src)
 
             return list(sources), list(sinks)
 
