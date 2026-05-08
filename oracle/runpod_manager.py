@@ -191,7 +191,6 @@ class CpuPodManager:
             "computeType": "CPU",
             "cpuFlavorIds": [CPU_POD_TYPE],
             "vcpuCount": 8,
-            "memoryInGb": 16,
             "containerDiskInGb": CPU_POD_DISK_SIZE,
             "ports": [f"{CPU_POD_PORT}/http"],
             "dockerStartCmd": CPU_POD_START_CMD,
