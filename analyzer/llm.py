@@ -43,7 +43,11 @@ class OmniscientContext:
         self.file_funcs: Dict[str, List[str]] = defaultdict(list)
 
     def build(self):
-        """チャンクリストから呼び出しグラフを構築"""
+        """
+        チャンクリストから呼び出しグラフを構築。
+        chunk.calls（ASTParser が AST から抽出した呼び出し先リスト）を優先使用。
+        chunk.calls が空の場合のみ正規表現フォールバック。
+        """
         for chunk in self.chunks:
             self.func_map[chunk.function_name] = chunk
             self.file_funcs[chunk.file_path].append(chunk.function_name)
@@ -51,21 +55,39 @@ class OmniscientContext:
         all_func_names = set(self.func_map.keys())
 
         for chunk in self.chunks:
-            # コード内で参照されている関数名を探す（簡易実装）
-            for name in all_func_names:
-                if name == chunk.function_name:
-                    continue
-                # 関数呼び出しパターン: func_name(
-                if re.search(r'\b' + re.escape(name) + r'\s*\(', chunk.code):
-                    self.call_graph[chunk.function_name].append(name)
-                    self.reverse_graph[name].append(chunk.function_name)
+            if chunk.calls:
+                # AST由来の呼び出し先を使用
+                for callee in chunk.calls:
+                    if callee in all_func_names and callee != chunk.function_name:
+                        if callee not in self.call_graph[chunk.function_name]:
+                            self.call_graph[chunk.function_name].append(callee)
+                        if chunk.function_name not in self.reverse_graph[callee]:
+                            self.reverse_graph[callee].append(chunk.function_name)
+            else:
+                # フォールバック: 正規表現で呼び出し先を検索
+                for name in all_func_names:
+                    if name == chunk.function_name:
+                        continue
+                    if re.search(r'\b' + re.escape(name) + r'\s*\(', chunk.code):
+                        self.call_graph[chunk.function_name].append(name)
+                        self.reverse_graph[name].append(chunk.function_name)
 
     def get_cross_file_context(self, chunk: FunctionChunk, max_lines: int = 60) -> str:
         """
-        指定チャンクの呼び出し元・呼び出し先・同一ファイルの関数一覧を返す
+        指定チャンクの呼び出し元・呼び出し先・同一ファイルの関数一覧・taint情報を返す
         """
         lines = []
         func_name = chunk.function_name
+
+        # AST由来のtaint情報
+        if chunk.taint_sources or chunk.taint_sinks:
+            lines.append(f"=== Taint analysis for {func_name} ===")
+            if chunk.taint_sources:
+                lines.append(f"[AST] taint sources (user-controlled): {chunk.taint_sources[:8]}")
+            if chunk.taint_sinks:
+                lines.append(f"[AST] taint sinks (dangerous): {chunk.taint_sinks[:8]}")
+            if chunk.params:
+                lines.append(f"[AST] params: {chunk.params}")
 
         # 呼び出し元（この関数を使っている関数）
         callers = self.reverse_graph.get(func_name, [])
@@ -76,6 +98,8 @@ class OmniscientContext:
                 if caller_chunk:
                     snippet = caller_chunk.code[:300]
                     lines.append(f"# {caller} ({caller_chunk.file_path})")
+                    if caller_chunk.taint_sources:
+                        lines.append(f"  caller taint sources: {caller_chunk.taint_sources[:4]}")
                     lines.append(snippet)
 
         # 呼び出し先（この関数が呼ぶ関数）
@@ -87,6 +111,8 @@ class OmniscientContext:
                 if callee_chunk:
                     snippet = callee_chunk.code[:300]
                     lines.append(f"# {callee} ({callee_chunk.file_path})")
+                    if callee_chunk.taint_sinks:
+                        lines.append(f"  callee taint sinks: {callee_chunk.taint_sinks[:4]}")
                     lines.append(snippet)
 
         # 同一ファイルの他関数一覧

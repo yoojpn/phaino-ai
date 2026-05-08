@@ -105,6 +105,12 @@ class FunctionChunk:
     # CodeQL結果（後から付与）
     codeql_confirmed: bool = False
     codeql_flow:      List[str] = field(default_factory=list)
+    # AST由来の呼び出しグラフ情報（ASTParser が付与）
+    calls:           List[str] = field(default_factory=list)  # この関数が呼ぶ関数名リスト
+    # DFG: source変数名リスト・sink変数名リスト（ASTParser が付与）
+    taint_sources:   List[str] = field(default_factory=list)  # ユーザー入力を受け取る変数
+    taint_sinks:     List[str] = field(default_factory=list)  # 危険な sink に渡る変数
+    params:          List[str] = field(default_factory=list)  # 引数名リスト
 
 
 class ASTParser:
@@ -161,6 +167,7 @@ class ASTParser:
         tree   = parser.parse(bytes(content, "utf-8"))
         chunks = []
         lines  = content.split("\n")
+        content_bytes = bytes(content, "utf-8")
 
         func_node_types = {
             "python":     ["function_definition", "async_function_definition"],
@@ -175,13 +182,122 @@ class ASTParser:
             "rust":       ["function_item"],
         }.get(language, ["function_definition"])
 
+        def node_text(n) -> str:
+            return content_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+
+        def extract_params(func_node) -> List[str]:
+            """関数の引数名を抽出"""
+            params = []
+            for child in func_node.children:
+                if child.type in ("parameters", "formal_parameters", "parameter_list",
+                                  "argument_list", "params"):
+                    for param in child.children:
+                        if param.type == "identifier":
+                            params.append(node_text(param))
+                        elif param.type in ("typed_parameter", "default_parameter",
+                                            "typed_default_parameter"):
+                            for sub in param.children:
+                                if sub.type == "identifier":
+                                    params.append(node_text(sub))
+                                    break
+            return params
+
+        def extract_calls(func_node) -> List[str]:
+            """AST を走査して呼び出し先関数名を収集"""
+            called = []
+            def walk(n):
+                if n.type == "call":
+                    # Python: call > (attribute | identifier) が関数名
+                    func_part = n.children[0] if n.children else None
+                    if func_part:
+                        if func_part.type == "identifier":
+                            called.append(node_text(func_part))
+                        elif func_part.type == "attribute":
+                            # obj.method → method だけ取る
+                            for sub in func_part.children:
+                                if sub.type in ("identifier", "property_identifier"):
+                                    called.append(node_text(sub))
+                elif n.type == "call_expression":
+                    # JS/TS
+                    func_part = n.children[0] if n.children else None
+                    if func_part:
+                        if func_part.type == "identifier":
+                            called.append(node_text(func_part))
+                        elif func_part.type == "member_expression":
+                            for sub in func_part.children:
+                                if sub.type == "property_identifier":
+                                    called.append(node_text(sub))
+                elif n.type == "method_invocation":
+                    # Java: method_invocation > identifier が関数名
+                    for sub in n.children:
+                        if sub.type == "identifier":
+                            called.append(node_text(sub))
+                            break
+                for child in n.children:
+                    walk(child)
+            walk(func_node)
+            return list(dict.fromkeys(called))  # 順序保持dedup
+
+        # taint source/sink パターン（変数名レベルで追跡）
+        SOURCE_CALL_PATTERNS = re.compile(
+            r"request\.|req\.|flask\.request|request\.form|request\.args|"
+            r"request\.json|request\.get_json|request\.data|"
+            r"\$_GET|\$_POST|\$_REQUEST|getParameter|getHeader|getCookie|"
+            r"req\.body|req\.query|req\.params|formData|"
+            r"sys\.argv|os\.environ|input\s*\(",
+            re.IGNORECASE
+        )
+        SINK_CALL_PATTERNS = re.compile(
+            r"execute\s*\(|cursor\.|\.query\s*\(|mysql_query|pg_query|"
+            r"os\.system\s*\(|subprocess\.|exec\s*\(|eval\s*\(|"
+            r"pickle\.loads|yaml\.load\s*\(|marshal\.loads|"
+            r"open\s*\(|readFile|writeFile|include\s*\(|require\s*\(|"
+            r"innerHTML|document\.write|render_template_string|Template\s*\(|"
+            r"requests\.get|requests\.post|urllib\.request|fetch\s*\(",
+            re.IGNORECASE
+        )
+
+        def extract_taint(func_node, params: List[str], code: str):
+            """
+            簡易汚染伝播：
+            - sources: source API を直接受けている変数 or パラメータ
+            - sinks: sink に渡っている変数
+            """
+            sources = set()
+            sinks   = set()
+
+            # 代入文から source を受け取る変数を検出
+            for m in re.finditer(
+                r"(\w+)\s*=\s*(?:.*?)" + SOURCE_CALL_PATTERNS.pattern,
+                code, re.IGNORECASE
+            ):
+                sources.add(m.group(1))
+
+            # パラメータ自体も source 候補（呼び出し元から汚染データが来る可能性）
+            for p in params:
+                sources.add(p)
+
+            # sink に変数が渡っているかチェック
+            for m in re.finditer(
+                SINK_CALL_PATTERNS.pattern + r"[^)]*?(\w+)[^)]*?\)",
+                code, re.IGNORECASE
+            ):
+                var = m.group(1) if m.lastindex else None
+                if var and (var in sources or len(var) > 1):
+                    sinks.add(var)
+
+            return list(sources), list(sinks)
+
         def traverse(node):
             if node.type in func_node_types:
-                name  = self._extract_func_name(node)
-                start = node.start_point[0]
-                end   = node.end_point[0]
-                code  = "\n".join(lines[start:end+1])
+                name   = self._extract_func_name(node)
+                start  = node.start_point[0]
+                end    = node.end_point[0]
+                code   = "\n".join(lines[start:end+1])
                 if len(code) <= MAX_FUNCTION_TOKENS * 4:
+                    params       = extract_params(node)
+                    calls        = extract_calls(node)
+                    t_src, t_snk = extract_taint(node, params, code)
                     chunks.append(FunctionChunk(
                         file_path=file_path,
                         language=language,
@@ -189,6 +305,10 @@ class ASTParser:
                         code=code,
                         start_line=start + 1,
                         end_line=end + 1,
+                        calls=calls,
+                        params=params,
+                        taint_sources=t_src,
+                        taint_sinks=t_snk,
                     ))
             for child in node.children:
                 traverse(child)
@@ -257,7 +377,7 @@ class ASTParser:
         Step1: サードパーティ → 即9
         Step2: テストコード   → 即7〜8
         Step3: 無名関数       → 即9
-        Step4: スコアリング
+        Step4: スコアリング（AST由来のtaintを優先、正規表現は補助）
         """
         file_path = chunk.file_path
         func_name = chunk.function_name
@@ -284,31 +404,46 @@ class ASTParser:
         score   = 0
         reasons = []
 
-        sink_hits = sum(
-            1 for p in HIGH_PRIORITY_SINK_PATTERNS
-            if re.search(p, code, re.IGNORECASE)
-        )
-        if sink_hits >= 3:
-            score += 40
-            reasons.append(f"sinkヒット{sink_hits}件")
-        elif sink_hits >= 1:
-            score += 25
-            reasons.append(f"sinkヒット{sink_hits}件")
+        # AST由来のtaint情報を優先使用
+        has_ast_source = bool(chunk.taint_sources)
+        has_ast_sink   = bool(chunk.taint_sinks)
 
-        source_hits = sum(
-            1 for p in HIGH_PRIORITY_SOURCE_PATTERNS
-            if re.search(p, code, re.IGNORECASE)
-        )
-        if source_hits >= 2:
+        if has_ast_source and has_ast_sink:
+            score += 55
+            reasons.append(f"AST taint: src={chunk.taint_sources[:2]} → sink={chunk.taint_sinks[:2]}")
+        elif has_ast_source:
             score += 20
-            reasons.append(f"sourceヒット{source_hits}件")
-        elif source_hits >= 1:
-            score += 10
-            reasons.append(f"sourceヒット{source_hits}件")
+            reasons.append(f"AST source={chunk.taint_sources[:2]}")
+        elif has_ast_sink:
+            score += 20
+            reasons.append(f"AST sink={chunk.taint_sinks[:2]}")
+        else:
+            # AST情報なし → 正規表現フォールバック
+            sink_hits = sum(
+                1 for p in HIGH_PRIORITY_SINK_PATTERNS
+                if re.search(p, code, re.IGNORECASE)
+            )
+            if sink_hits >= 3:
+                score += 40
+                reasons.append(f"sinkヒット{sink_hits}件")
+            elif sink_hits >= 1:
+                score += 25
+                reasons.append(f"sinkヒット{sink_hits}件")
 
-        if sink_hits >= 1 and source_hits >= 1:
-            score += 15
-            reasons.append("source+sink両方")
+            source_hits = sum(
+                1 for p in HIGH_PRIORITY_SOURCE_PATTERNS
+                if re.search(p, code, re.IGNORECASE)
+            )
+            if source_hits >= 2:
+                score += 20
+                reasons.append(f"sourceヒット{source_hits}件")
+            elif source_hits >= 1:
+                score += 10
+                reasons.append(f"sourceヒット{source_hits}件")
+
+            if sink_hits >= 1 and source_hits >= 1:
+                score += 15
+                reasons.append("source+sink両方")
 
         func_lower = func_name.lower()
         if any(k in func_lower for k in HIGH_PRIORITY_FUNC_NAMES):
