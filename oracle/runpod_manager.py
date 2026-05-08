@@ -47,7 +47,7 @@ _CPU_POD_INLINE_SCRIPT = (
     "apt-get update -qq && apt-get install -y -qq git && "
     "pip install -q fastapi uvicorn tree-sitter tree-sitter-python tree-sitter-javascript "
     "tree-sitter-java tree-sitter-c tree-sitter-cpp tree-sitter-go tree-sitter-rust "
-    "PyGithub httpx pydantic && "
+    "PyGithub httpx pydantic beautifulsoup4 requests && "
     "mkdir -p /workspace && cd /workspace && "
     "(git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan || "
     "(cd vulnscan && git pull)) && "
