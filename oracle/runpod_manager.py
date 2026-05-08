@@ -44,6 +44,7 @@ CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "300"))
 # 8vCPUs 16GB RAM $0.28/hr に対応するRunPodのCPUタイプ
 CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c")  # 有効値: cpu3c/cpu3g/cpu3m/cpu5c/cpu5g/cpu5m
 _CPU_POD_INLINE_SCRIPT = (
+    "apt-get update -qq && apt-get install -y -qq git && "
     "pip install -q fastapi uvicorn tree-sitter tree-sitter-python tree-sitter-javascript "
     "tree-sitter-java tree-sitter-c tree-sitter-cpp tree-sitter-go tree-sitter-rust "
     "PyGithub httpx pydantic && "
