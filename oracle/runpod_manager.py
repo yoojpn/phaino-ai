@@ -149,7 +149,17 @@ class CpuPodManager:
         deadline = asyncio.get_event_loop().time() + CPU_POD_HEALTH_TIMEOUT
         while asyncio.get_event_loop().time() < deadline:
             if await self._check_health(url):
-                logger.info("[CPU] CPUワーカー ready")
+                # バージョン情報をログに出す
+                try:
+                    async with httpx.AsyncClient() as client:
+                        r = await client.get(f"{url}/health", timeout=5, follow_redirects=True)
+                        info = r.json()
+                        logger.info(
+                            f"[CPU] CPUワーカー ready | commit={info.get('commit','?')} "
+                            f"tree_sitter_languages={info.get('tree_sitter_languages','?')}"
+                        )
+                except Exception:
+                    logger.info("[CPU] CPUワーカー ready")
                 return url
             await asyncio.sleep(5)
         raise RuntimeError("CPUワーカー起動タイムアウト")

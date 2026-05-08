@@ -453,4 +453,17 @@ async def analyze(req: AnalyzeRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    import subprocess
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", "/workspace/vulnscan", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        commit = "unknown"
+    try:
+        from tree_sitter_languages import get_parser
+        ts_ok = True
+    except Exception:
+        ts_ok = False
+    return {"status": "ok", "commit": commit, "tree_sitter_languages": ts_ok}
