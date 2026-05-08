@@ -6,24 +6,19 @@ set -e
 
 echo "[CPU Worker] 起動開始..."
 
-# 依存インストール（失敗しても続行）
+# 依存インストール
 pip install -q \
     fastapi \
     uvicorn \
-    tree-sitter>=0.22.0 \
-    tree-sitter-python>=0.22.0 \
-    tree-sitter-javascript>=0.22.0 \
-    tree-sitter-typescript \
-    tree-sitter-java>=0.22.0 \
-    tree-sitter-c>=0.22.0 \
-    tree-sitter-cpp>=0.22.0 \
-    tree-sitter-go>=0.22.0 \
-    tree-sitter-rust>=0.22.0 \
+    tree-sitter==0.21.3 \
+    tree-sitter-languages==1.10.2 \
     PyGithub>=2.3.0 \
     beautifulsoup4>=4.12.0 \
     requests>=2.31.0 \
     httpx \
     pydantic
+
+echo "[CPU Worker] pip install完了"
 
 # vulnscanをクローン（最新版）
 mkdir -p /workspace
