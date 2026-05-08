@@ -75,7 +75,6 @@ class ScanWorker:
 
             from analyzer.llm import VulnAnalyzer, OmniscientContext
             from analyzer.react_loop import ReActLoop
-            from analyzer.compound import build_compound_groups
             from sandbox.attacker import DockerExecutor
             from sandbox.verifier import SandboxVerifier
             from reporter.report import ReportGenerator
