@@ -622,7 +622,7 @@ class VulnAnalyzer:
 
             tasks = []
             for chunk in batch:
-                cross_file = omniscient.get_cross_file_context(chunk) if omniscient else ""
+                cross_file = omniscient.get_cross_file_context(chunk, max_chars=4000) if omniscient else ""
                 if chunk.language == "php":
                     prompt_type = "php"
                 elif chunk.priority >= 5:
@@ -696,7 +696,33 @@ class VulnAnalyzer:
             return self._build_vuln_sample(data, chunk, is_compound, compound_group)
 
         except Exception as e:
-            print(f"  [-] LLMエラー ({chunk.function_name}): {e}")
+            err_str = str(e)
+            # トークン超過エラーの場合、プロンプトを削ってリトライ
+            if "context length" in err_str or "input_tokens" in err_str or "400" in err_str:
+                try:
+                    truncated = user_prompt[:8000] + "\n...(truncated for context limit)"
+                    resp = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user",   "content": truncated},
+                        ],
+                        tools=[REPORT_TOOL],
+                        tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
+                        max_tokens=1500,
+                        temperature=0.1,
+                        extra_body={"chat_template_kwargs": {"thinking": False}},
+                    )
+                    msg = resp.choices[0].message
+                    if msg.tool_calls:
+                        tc = msg.tool_calls[0]
+                        if tc.function.name == "report_vulnerability":
+                            data = json.loads(tc.function.arguments)
+                            return self._build_vuln_sample(data, chunk, is_compound, compound_group)
+                except Exception as e2:
+                    print(f"  [-] LLMリトライ失敗 ({chunk.function_name}): {e2}")
+            else:
+                print(f"  [-] LLMエラー ({chunk.function_name}): {e}")
             return None
 
     def _build_vuln_sample(
