@@ -45,9 +45,10 @@ CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "300"))
 CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c")  # 有効値: cpu3c/cpu3g/cpu3m/cpu5c/cpu5g/cpu5m
 _CPU_POD_INLINE_SCRIPT = (
     "apt-get update -qq && apt-get install -y -qq git && "
-    "pip install -q fastapi uvicorn tree-sitter tree-sitter-python tree-sitter-javascript "
-    "tree-sitter-java tree-sitter-c tree-sitter-cpp tree-sitter-go tree-sitter-rust "
-    "PyGithub httpx pydantic beautifulsoup4 requests && "
+    "pip uninstall -y tree-sitter tree-sitter-languages 2>/dev/null || true && "
+    "pip install -q fastapi uvicorn PyGithub httpx pydantic beautifulsoup4 requests "
+    "\"tree-sitter==0.21.3\" \"tree-sitter-languages==1.10.2\" && "
+    "python3 -c \"from tree_sitter_languages import get_parser; get_parser('java'); print('[CPU] tree_sitter_languages OK')\" && "
     "mkdir -p /workspace && cd /workspace && "
     "(git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan || "
     "(cd vulnscan && git pull)) && "
