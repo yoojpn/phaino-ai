@@ -622,7 +622,7 @@ class VulnAnalyzer:
 
             tasks = []
             for chunk in batch:
-                cross_file = omniscient.get_cross_file_context(chunk, max_chars=4000) if omniscient else ""
+                cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
                 if chunk.language == "php":
                     prompt_type = "php"
                 elif chunk.priority >= 5:
