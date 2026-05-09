@@ -50,8 +50,8 @@ _CPU_POD_INLINE_SCRIPT = (
     "\"tree-sitter==0.21.3\" \"tree-sitter-languages==1.10.2\" && "
     "python3 -c \"from tree_sitter_languages import get_parser; get_parser('java'); print('[CPU] tree_sitter_languages OK')\" && "
     "mkdir -p /workspace && cd /workspace && "
-    "(git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan || "
-    "(cd vulnscan && git pull)) && "
+    "rm -rf vulnscan && "
+    "git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan && "
     "cd /workspace/vulnscan && "
     "exec uvicorn oracle.cpu_worker_server:app --host 0.0.0.0 --port ${CPU_POD_PORT:-8001} --workers 4"
 )
