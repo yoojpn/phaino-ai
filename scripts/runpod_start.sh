@@ -55,10 +55,10 @@ python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL_DIR" \
     --host "$VLLM_HOST" \
     --port "$VLLM_PORT" \
-    --dtype float16 \
-    --quantization fp8 \
-    --max-model-len "$MAX_MODEL_LEN" \
+    --dtype auto \
+    --max-model-len 16384 \
     --gpu-memory-utilization "$GPU_MEMORY_UTIL" \
+    --max-num-seqs 64 \
     --enable-prefix-caching \
     --served-model-name "Qwen/Qwen3.6-27B" \
     --trust-remote-code \
