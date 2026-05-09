@@ -104,7 +104,7 @@ class FunctionChunk:
     context_refs:    List[str] = field(default_factory=list)
     # CodeQL結果（後から付与）
     codeql_confirmed: bool = False
-    codeql_flow:      List[str] = field(default_factory=list)
+    codeql_flow:      str  = ""
     # AST由来の呼び出しグラフ情報（ASTParser が付与）
     calls:           List[str] = field(default_factory=list)  # この関数が呼ぶ関数名リスト
     # DFG: source変数名リスト・sink変数名リスト（ASTParser が付与）
