@@ -239,7 +239,7 @@ class OmniscientContext:
                 else:
                     break
 
-            if len(chain) >= 2:
+            if len(chain) >= 1:
                 groups.append(chain)
 
         return groups
