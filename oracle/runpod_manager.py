@@ -52,6 +52,17 @@ _CPU_POD_INLINE_SCRIPT = (
     "mkdir -p /workspace && cd /workspace && "
     "rm -rf vulnscan && "
     "git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan && "
+    # CodeQLバンドルのダウンロード（未インストール時のみ）
+    "if [ ! -f /workspace/codeql/codeql ]; then "
+    "  echo '[CPU] CodeQLダウンロード中...' && "
+    "  cd /workspace && "
+    "  curl -sL https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.24.2/codeql-bundle-linux64.tar.zst -o codeql-bundle.tar.zst && "
+    "  tar --use-compress-program=unzstd -xf codeql-bundle.tar.zst && "
+    "  rm codeql-bundle.tar.zst && "
+    "  echo '[CPU] CodeQL準備完了'; "
+    "else "
+    "  echo '[CPU] CodeQL既存 skip'; "
+    "fi && "
     "cd /workspace/vulnscan && "
     "exec uvicorn oracle.cpu_worker_server:app --host 0.0.0.0 --port ${CPU_POD_PORT:-8001} --workers 4"
 )

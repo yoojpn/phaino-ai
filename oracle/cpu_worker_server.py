@@ -61,8 +61,9 @@ class ChunkData(BaseModel):
     # 多段taint伝播の結果
     propagated_sources: List[str] = []   # 伝播後のtaint変数セット
     taint_paths: List[str] = []          # source→sinkのパス説明
-    # クラス構造情報
-    class_name: Optional[str] = None
+    # CodeQL解析結果
+    codeql_confirmed: bool = False
+    codeql_flow: str = ""
     class_parents: List[str] = []
     annotations: List[str] = []
 
@@ -301,6 +302,214 @@ class TaintEngine:
 # メイン解析エンドポイント
 # ===========================
 
+
+# ===========================
+# CodeQL統合
+# ===========================
+
+CODEQL_DIR = Path(os.getenv("CODEQL_DIR", "/workspace/codeql"))
+CODEQL_BIN = CODEQL_DIR / "codeql"
+
+# CodeQLが対応する言語マッピング
+CODEQL_LANG_MAP = {
+    "python":     "python",
+    "javascript": "javascript",
+    "java":       "java",
+    "cpp":        "cpp",
+    "c":          "cpp",
+    "go":         "go",
+    "ruby":       "ruby",
+}
+
+# 言語別クエリスイート
+CODEQL_QUERY_SUITES = {
+    "python":     "codeql/python-queries:codeql-suites/python-security-and-quality.qls",
+    "javascript": "codeql/javascript-queries:codeql-suites/javascript-security-and-quality.qls",
+    "java":       "codeql/java-queries:codeql-suites/java-security-and-quality.qls",
+    "cpp":        "codeql/cpp-queries:codeql-suites/cpp-security-and-quality.qls",
+    "go":         "codeql/go-queries:codeql-suites/go-security-and-quality.qls",
+    "ruby":       "codeql/ruby-queries:codeql-suites/ruby-security-and-quality.qls",
+}
+
+
+def detect_languages(files) -> List[str]:
+    """ファイルリストから使用言語を検出"""
+    langs = set()
+    for f in files:
+        lang = getattr(f, "language", None) or ""
+        cq_lang = CODEQL_LANG_MAP.get(lang.lower())
+        if cq_lang:
+            langs.add(cq_lang)
+    return list(langs)
+
+
+def parse_sarif(sarif_path: Path) -> List[Dict]:
+    """SARIFファイルをパースしてsource→sinkパスリストを返す"""
+    results = []
+    try:
+        with open(sarif_path, encoding="utf-8") as f:
+            sarif = json.load(f)
+        for run in sarif.get("runs", []):
+            for result in run.get("results", []):
+                rule_id = result.get("ruleId", "")
+                message = result.get("message", {}).get("text", "")
+                # パス情報（codeFlows）からsource/sinkを抽出
+                code_flows = result.get("codeFlows", [])
+                for flow in code_flows:
+                    for thread_flow in flow.get("threadFlows", []):
+                        locs = thread_flow.get("locations", [])
+                        if len(locs) < 2:
+                            continue
+                        source_loc = locs[0].get("location", {})
+                        sink_loc = locs[-1].get("location", {})
+
+                        source_file = (source_loc.get("physicalLocation", {})
+                                       .get("artifactLocation", {}).get("uri", ""))
+                        source_line = (source_loc.get("physicalLocation", {})
+                                       .get("region", {}).get("startLine", 0))
+                        sink_file = (sink_loc.get("physicalLocation", {})
+                                     .get("artifactLocation", {}).get("uri", ""))
+                        sink_line = (sink_loc.get("physicalLocation", {})
+                                     .get("region", {}).get("startLine", 0))
+
+                        results.append({
+                            "rule_id": rule_id,
+                            "message": message,
+                            "source_file": source_file,
+                            "source_line": source_line,
+                            "sink_file": sink_file,
+                            "sink_line": sink_line,
+                            "flow_length": len(locs),
+                        })
+
+                # codeFlowsがない場合はlocationのみ
+                if not code_flows:
+                    for loc_obj in result.get("locations", []):
+                        phys = loc_obj.get("physicalLocation", {})
+                        file_uri = phys.get("artifactLocation", {}).get("uri", "")
+                        line = phys.get("region", {}).get("startLine", 0)
+                        results.append({
+                            "rule_id": rule_id,
+                            "message": message,
+                            "source_file": file_uri,
+                            "source_line": line,
+                            "sink_file": file_uri,
+                            "sink_line": line,
+                            "flow_length": 1,
+                        })
+    except Exception as e:
+        logger.warning(f"  SARIF parse error: {e}")
+    return results
+
+
+def merge_codeql_results(chunks, codeql_results: List[Dict]):
+    """
+    CodeQLのsource→sink結果をchunksのtaint情報にマージ。
+    該当する行番号のchunkにCodeQL検出フラグを付与する。
+    """
+    for result in codeql_results:
+        sink_file = result["sink_file"]
+        sink_line = result["sink_line"]
+        rule_id = result["rule_id"]
+        message = result["message"]
+
+        for chunk in chunks:
+            # ファイルパスの末尾マッチ（絶対パス vs 相対パス対策）
+            if not (chunk.file_path.endswith(sink_file) or
+                    sink_file.endswith(chunk.file_path.lstrip("/"))):
+                continue
+            if not (chunk.start_line <= sink_line <= chunk.end_line):
+                continue
+
+            # taint_sinksにCodeQL検出のsinkを追加
+            codeql_sink = f"[CodeQL:{rule_id}] line {sink_line}"
+            if codeql_sink not in chunk.taint_sinks:
+                chunk.taint_sinks.append(codeql_sink)
+
+            # sourceがある場合taint_sourcesにも追加
+            source_label = f"[CodeQL] {message[:80]}"
+            if source_label not in chunk.taint_sources:
+                chunk.taint_sources.append(source_label)
+
+            # codeql_confirmedフラグ
+            chunk.codeql_confirmed = True
+            chunk.codeql_flow = message[:200]
+
+            # 優先度を最高に引き上げ
+            chunk.priority = max(chunk.priority, 8)
+            break
+
+
+async def run_codeql(tmpdir: str, files, chunks) -> List[Dict]:
+    """
+    CodeQL CLIを使ってtaint解析を実行。
+    結果のSARIFをパースして返す。インストールされていない場合は空リストを返す。
+    """
+    if not CODEQL_BIN.exists():
+        return []
+
+    langs = detect_languages(files)
+    if not langs:
+        return []
+
+    all_results = []
+    src_root = Path(tmpdir)
+    codeql_work = src_root / "_codeql_work"
+    codeql_work.mkdir(exist_ok=True)
+
+    for lang in langs:
+        suite = CODEQL_QUERY_SUITES.get(lang)
+        if not suite:
+            continue
+
+        db_path = codeql_work / f"db_{lang}"
+        sarif_path = codeql_work / f"results_{lang}.sarif"
+
+        try:
+            logger.info(f"  CodeQL DB作成中: {lang}")
+            proc = await asyncio.create_subprocess_exec(
+                str(CODEQL_BIN), "database", "create",
+                str(db_path),
+                f"--language={lang}",
+                "--build-mode=none",
+                f"--source-root={src_root}",
+                "--overwrite",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            if proc.returncode != 0:
+                logger.warning(f"  CodeQL DB作成失敗 ({lang}): {stderr.decode()[-500:]}")
+                continue
+
+            logger.info(f"  CodeQL analyze中: {lang}")
+            proc = await asyncio.create_subprocess_exec(
+                str(CODEQL_BIN), "database", "analyze",
+                str(db_path),
+                suite,
+                "--format=sarif-latest",
+                f"--output={sarif_path}",
+                "--threads=4",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+            if proc.returncode != 0:
+                logger.warning(f"  CodeQL analyze失敗 ({lang}): {stderr.decode()[-500:]}")
+                continue
+
+            results = parse_sarif(sarif_path)
+            logger.info(f"  CodeQL {lang}: {len(results)}件検出")
+            all_results.extend(results)
+
+        except asyncio.TimeoutError:
+            logger.warning(f"  CodeQL タイムアウト ({lang})")
+        except Exception as e:
+            logger.warning(f"  CodeQL エラー ({lang}): {e}")
+
+    return all_results
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest):
     tmpdir = None
@@ -376,6 +585,14 @@ async def analyze(req: AnalyzeRequest):
 
         logger.info(f"  呼び出しグラフ: {len([v for v in call_graph.values() if v])}関数")
 
+        # Step3.5: CodeQL解析（利用可能な場合）
+        codeql_results = await run_codeql(tmpdir, files, chunks)
+        if codeql_results:
+            merge_codeql_results(chunks, codeql_results)
+            logger.info(f"  CodeQL: {len(codeql_results)}件のsource→sinkパスをマージ")
+        else:
+            logger.info("  CodeQL: スキップ（未インストールまたはエラー）")
+
         # Step4: 多段taint伝播
         logger.info("  多段taint伝播開始...")
         engine = TaintEngine(chunks, call_graph, reverse_graph)
@@ -408,6 +625,8 @@ async def analyze(req: AnalyzeRequest):
                 class_name=getattr(c, "class_name", None),
                 class_parents=getattr(c, "class_parents", []),
                 annotations=getattr(c, "annotations", []),
+                codeql_confirmed=getattr(c, "codeql_confirmed", False),
+                codeql_flow=getattr(c, "codeql_flow", ""),
             ))
 
         taint_summary = {

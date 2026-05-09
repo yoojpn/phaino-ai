@@ -148,6 +148,8 @@ class ScanWorker:
                 # 多段taint伝播結果を付与
                 c.propagated_sources = r.get("propagated_sources", [])
                 c.taint_paths = r.get("taint_paths", [])
+                c.codeql_confirmed = r.get("codeql_confirmed", False)
+                c.codeql_flow = r.get("codeql_flow", "")
                 chunks.append(c)
 
             # OmniscientContextをOracle側で再構築（call_graphはCPUポッドから受け取ったものを使用）
