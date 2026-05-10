@@ -165,37 +165,47 @@ class ScanWorker:
             self._log(job_id, f"  呼び出しグラフ: {len([v for v in call_graph.values() if v])}関数\n")
 
             # ===========================
-            # 優先度フィルタ
+            # 優先度フィルタ・ソート
             # ===========================
             max_functions = options.get("max_functions", 0)
+            import re as _re
+            SINK_PATTERNS = [
+                "memcpy", "memmove", "memset", "strcpy", "strcat", "sprintf",
+                "malloc", "realloc", "free", "alloca", "new ", "delete ",
+                "read", "write", "recv", "send", "fread", "fwrite",
+                "parse", "decode", "deserializ", "uncompress", "inflate",
+            ]
+
+            def _score(chunk):
+                score = 0
+                code = chunk.code.lower()
+                for kw in SINK_PATTERNS:
+                    if kw in code:
+                        score += 3
+                if _re.search(r'\b(char\s*\*|void\s*\*|uint8_t\s*\*|size_t|len|length|size|count)', code):
+                    score += 2
+                score += min(code.count("\n") // 10, 5)
+                score += min(len(_re.findall(r'\b(if|for|while|switch|case)\b', code)), 5)
+                # CodeQL確認済みは最優先
+                if getattr(chunk, 'codeql_confirmed', False):
+                    score += 30
+                # 多段taint伝播でsource→sink確認済みは高優先
+                if getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks:
+                    score += 20
+                return score
+
+            chunks.sort(key=_score, reverse=True)
+            # スコアをpriorityに反映（attacker promptの閾値priority>=5に対応）
+            for chunk in chunks:
+                s = _score(chunk)
+                if s >= 20:
+                    chunk.priority = max(chunk.priority, 8)
+                elif s >= 10:
+                    chunk.priority = max(chunk.priority, 5)
+            original_count = len(chunks)
             if max_functions and max_functions > 0:
-                import re as _re
-                SINK_PATTERNS = [
-                    "memcpy", "memmove", "memset", "strcpy", "strcat", "sprintf",
-                    "malloc", "realloc", "free", "alloca", "new ", "delete ",
-                    "read", "write", "recv", "send", "fread", "fwrite",
-                    "parse", "decode", "deserializ", "uncompress", "inflate",
-                ]
-
-                def _score(chunk):
-                    score = 0
-                    code = chunk.code.lower()
-                    for kw in SINK_PATTERNS:
-                        if kw in code:
-                            score += 3
-                    if _re.search(r'\b(char\s*\*|void\s*\*|uint8_t\s*\*|size_t|len|length|size|count)', code):
-                        score += 2
-                    score += min(code.count("\n") // 10, 5)
-                    score += min(len(_re.findall(r'\b(if|for|while|switch|case)\b', code)), 5)
-                    # 多段taint伝播でsource→sink確認済みは最優先
-                    if getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks:
-                        score += 20
-                    return score
-
-                chunks.sort(key=_score, reverse=True)
-                original_count = len(chunks)
                 chunks = chunks[:max_functions]
-                self._log(job_id, f"  優先度フィルタ: {original_count}関数 → {len(chunks)}関数\n")
+            self._log(job_id, f"  優先度フィルタ: {original_count}関数 → {len(chunks)}関数\n")
 
             compound_groups = _build_compound_groups(chunks)
             class_groups = omniscient.build_class_groups()
