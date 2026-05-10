@@ -466,12 +466,16 @@ async def run_codeql(tmpdir: str, files, chunks) -> List[Dict]:
         sarif_path = codeql_work / f"results_{lang}.sarif"
 
         try:
+            # コンパイル言語のみ --build-mode=none（interpreted言語に渡すとエラー）
+            COMPILED_LANGS = {"cpp", "java", "go", "csharp"}
+            build_mode_args = ["--build-mode=none"] if lang in COMPILED_LANGS else []
+
             logger.info(f"  CodeQL DB作成中: {lang}")
             proc = await asyncio.create_subprocess_exec(
                 str(CODEQL_BIN), "database", "create",
                 str(db_path),
                 f"--language={lang}",
-                "--build-mode=none",
+                *build_mode_args,
                 f"--source-root={src_root}",
                 "--overwrite",
                 stdout=asyncio.subprocess.PIPE,
