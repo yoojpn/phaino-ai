@@ -524,7 +524,7 @@ class RunPodManager:
                 "--tool-call-parser", "pythonic",
                 "--enable-auto-tool-choice",
                 "--enable-prefix-caching",
-                "--max-num-seqs", "32",
+                "--max-num-seqs", "16",
                 "--port", "8000"
             ],
             "env": {
