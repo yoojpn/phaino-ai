@@ -296,15 +296,22 @@ class RunPodManager:
             pods = resp.json().get("data", {}).get("myself", {}).get("pods", [])
 
         for pod in pods:
-            if RUNPOD_POD_NAME.lower() in (pod.get("name") or "").lower():
+            pod_name = (pod.get("name") or "").lower()
+            # CPUポッドを除外してGPUポッドのみ検出
+            if CPU_POD_NAME.lower() in pod_name:
+                continue
+            if RUNPOD_POD_NAME.lower() in pod_name:
                 self._pod_id = pod["id"]
                 logger.info(f"Pod自動検出: {pod['name']} ({pod['id']})")
                 return pod["id"]
 
-        if pods:
-            self._pod_id = pods[0]["id"]
-            logger.info(f"Pod自動選択（名前不一致）: {pods[0].get('name')} ({pods[0]['id']})")
-            return self._pod_id
+        # フォールバック: CPUポッド以外の最初のポッド
+        for pod in pods:
+            pod_name = (pod.get("name") or "").lower()
+            if CPU_POD_NAME.lower() not in pod_name:
+                self._pod_id = pod["id"]
+                logger.info(f"Pod自動選択（名前不一致）: {pod.get('name')} ({pod['id']})")
+                return self._pod_id
 
         return None
 
