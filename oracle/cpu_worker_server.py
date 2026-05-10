@@ -859,12 +859,55 @@ async def start_codeql(req: CodeQLRequest):
                         continue
                     langs.append(lang)
 
-            class _DummyFile:
-                def __init__(self, lang): self.language = lang
-            dummy_files = [_DummyFile(l) for l in langs]
+            logger.info(f"  [CodeQL] 解析対象言語: {langs}")
 
-            results = await run_codeql(str(src_root), dummy_files, [])
-            _codeql_jobs[job_id] = {"status": "done", "results": results, "error": None}
+            # detect_languages を経由せず直接 run_codeql を呼ぶ
+            # （detect_languagesはfilesオブジェクトの個数をカウントするため1件扱いになる）
+            all_results = []
+            src_root_path = src_root
+            codeql_work = src_root_path / "_codeql_work"
+            codeql_work.mkdir(exist_ok=True)
+
+            for lang in langs:
+                suite = CODEQL_QUERY_SUITES.get(lang)
+                if not suite:
+                    continue
+                db_path = codeql_work / f"db_{lang}"
+                sarif_path = codeql_work / f"results_{lang}.sarif"
+                try:
+                    COMPILED_LANGS = {"cpp", "java", "go", "csharp"}
+                    build_mode_args = ["--build-mode=none"] if lang in COMPILED_LANGS else []
+                    logger.info(f"  CodeQL DB作成中: {lang}")
+                    proc = await asyncio.create_subprocess_exec(
+                        str(CODEQL_BIN), "database", "create", str(db_path),
+                        f"--language={lang}", *build_mode_args,
+                        f"--source-root={src_root_path}", "--overwrite",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+                    if proc.returncode != 0:
+                        logger.warning(f"  CodeQL DB作成失敗 ({lang}): {stderr.decode()[-500:]}")
+                        continue
+                    logger.info(f"  CodeQL analyze中: {lang}")
+                    proc = await asyncio.create_subprocess_exec(
+                        str(CODEQL_BIN), "database", "analyze", str(db_path),
+                        suite, "--format=sarif-latest", f"--output={sarif_path}",
+                        "--threads=2", "--ram=4096",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+                    if proc.returncode != 0:
+                        logger.warning(f"  CodeQL analyze失敗 ({lang}): {stderr.decode()[-500:]}")
+                        continue
+                    results_lang = parse_sarif(sarif_path)
+                    logger.info(f"  CodeQL {lang}: {len(results_lang)}件検出")
+                    all_results.extend(results_lang)
+                except asyncio.TimeoutError:
+                    logger.warning(f"  CodeQL タイムアウト ({lang})")
+                except Exception as e:
+                    logger.warning(f"  CodeQL エラー ({lang}): {e}")
+
+            _codeql_jobs[job_id] = {"status": "done", "results": all_results, "error": None}
         except Exception as e:
             _codeql_jobs[job_id] = {"status": "done", "results": [], "error": str(e)}
         finally:
