@@ -632,8 +632,12 @@ class VulnAnalyzer:
                 cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
                 if chunk.language == "php":
                     prompt_type = "php"
-                else:
+                elif getattr(chunk, 'codeql_confirmed', False) or (
+                    getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks
+                ) or chunk.priority >= 5:
                     prompt_type = "attacker"
+                else:
+                    prompt_type = "structural"
                 tasks.append(self.analyze_chunk(chunk, prompt_type, cross_file=cross_file))
 
             batch_results = await asyncio.gather(*tasks)

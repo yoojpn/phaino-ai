@@ -222,6 +222,38 @@ class SandboxVerifier:
             api_key=LLM_API_KEY,
         )
 
+    async def _verify_with_libfuzzer(self, sample: VulnSample) -> VulnSample:
+        """C/C++メモリ系脆弱性をlibFuzzerで検証"""
+        func = _func_name(sample)
+        print(f"    [*] libFuzzer検証: {func}")
+
+        harness = await self._generate_libfuzzer_harness(sample)
+        if "harness generation error" in harness:
+            print(f"       [!] ハーネス生成失敗、ASANにフォールバック")
+            payloads = _extract_payloads(sample)
+            payload = payloads[0] if payloads else "A" * 256
+            result = await self.docker.run_asan(sample.code, sample.language.value, payload)
+        else:
+            result = await self.docker.run_libfuzzer(
+                sample.code, harness, sample.language.value, timeout=30
+            )
+
+        # クラッシュ検出判定
+        crash_indicators = [
+            "heap-buffer-overflow", "stack-buffer-overflow", "use-after-free",
+            "segmentation fault", "==error:", "crash_", "asan:", "signal 11",
+            "AddressSanitizer", "attempting free on address",
+        ]
+        result_lower = result.lower()
+        if any(ind.lower() in result_lower for ind in crash_indicators):
+            sample.attack_model.exploitability = Exploitability.CONFIRMED
+            sample.attack_scenario.poc_script = f"# libFuzzer crash confirmed\n\n# Output\n{result[:800]}"
+            print(f"       [✓] libFuzzerがクラッシュを検出")
+        else:
+            print(f"       [-] クラッシュ未検出: {result[:80].strip()!r}")
+
+        return sample
+
     async def _generate_poc(
         self,
         sample: VulnSample,
@@ -291,6 +323,48 @@ Otherwise, output ONLY the PoC script code, no explanation.
         except Exception as e:
             return f"# PoC generation error: {e}"
 
+    async def _generate_libfuzzer_harness(self, sample: VulnSample) -> str:
+        """LLMにlibFuzzerハーネスを生成させる"""
+        client = self._get_llm_client()
+        from config import LLM_MODEL
+        import os
+
+        prompt = f"""Generate a libFuzzer harness for the following C/C++ function to detect memory safety bugs.
+
+## Vulnerable function
+```{sample.language.value}
+{sample.code[:1000]}
+```
+
+## Suspected vulnerability
+{sample.label.cwe}: {sample.analysis.sink}
+
+## Requirements
+- Write ONLY the LLVMFuzzerTestOneInput function
+- Do NOT redefine the target function (it will be compiled together)
+- Call the target function with fuzzed inputs derived from Data/Size
+- The harness must compile with: clang -fsanitize=fuzzer,address
+
+Output ONLY the harness code, no explanation.
+"""
+        try:
+            resp = await client.chat.completions.create(
+                model=os.getenv("LLM_MODEL", LLM_MODEL),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=600,
+                temperature=0.1,
+                extra_body={"chat_template_kwargs": {"thinking": False}},
+            )
+            harness = resp.choices[0].message.content.strip()
+            # コードブロックを除去
+            if "```" in harness:
+                harness = harness.split("```")[1]
+                if harness.startswith(("c\n", "cpp\n")):
+                    harness = harness.split("\n", 1)[1]
+            return harness
+        except Exception as e:
+            return f"// harness generation error: {e}"
+
     async def verify(self, sample: VulnSample) -> VulnSample:
         """
         単一サンプルを検証してexploitabilityを更新する
@@ -301,6 +375,14 @@ Otherwise, output ONLY the PoC script code, no explanation.
 
         func = _func_name(sample)
         print(f"    [*] LLM PoC生成+検証: {func} ({sample.attack_model.type.value})")
+
+        # C/C++ のメモリ系はlibFuzzerで検証
+        is_cpp_memory = (
+            sample.language.value in ("c", "cpp") and
+            sample.attack_model.type == AttackType.OVERFLOW
+        )
+        if is_cpp_memory:
+            return await self._verify_with_libfuzzer(sample)
 
         last_error = ""
         for attempt in range(MAX_DOCKER_RETRY):

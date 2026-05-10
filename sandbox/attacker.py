@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y \\
     openjdk-17-jdk-headless php-cli \\
     golang-go \\
     gcc g++ gdb \\
+    clang llvm \\
     libasan6 libasan8 \\
     curl wget netcat-openbsd \\
     git build-essential \\
@@ -242,6 +243,47 @@ quit
         run_cmd     = f"/sandbox/asan_target {payload}"
 
         result = await self._run_in_docker(compile_cmd, "attacker")
+        result += await self._run_in_docker(run_cmd, "attacker")
+        return result
+
+    async def run_libfuzzer(
+        self,
+        code: str,
+        harness: str,
+        language: str,
+        timeout: int = 30,
+    ) -> str:
+        """
+        libFuzzerでメモリ安全性バグを検出。
+        code: 脆弱な関数のコード
+        harness: LLMが生成したlibFuzzerハーネスコード
+        """
+        if language not in ("c", "cpp"):
+            return "libFuzzer: C/C++のみ対応"
+
+        ext = ".cpp" if language == "cpp" else ".c"
+        compiler = "clang++" if language == "cpp" else "clang"
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=ext, delete=False, dir=self.sandbox_dir
+        ) as f:
+            # ハーネスと対象コードを結合
+            combined = f"{code}\n\n{harness}"
+            f.write(combined)
+            src_path = f.name
+
+        compile_cmd = (
+            f"{compiler} -fsanitize=fuzzer,address -O1 "
+            f"-o /sandbox/fuzz_target {src_path}"
+        )
+        run_cmd = (
+            f"timeout {timeout} /sandbox/fuzz_target "
+            f"-max_total_time={timeout} -max_len=4096 2>&1 | tail -30"
+        )
+
+        result = await self._run_in_docker(compile_cmd, "attacker")
+        if "error:" in result.lower():
+            return f"libFuzzer compile error:\n{result[:500]}"
         result += await self._run_in_docker(run_cmd, "attacker")
         return result
 
