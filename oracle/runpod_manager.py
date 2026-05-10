@@ -523,8 +523,9 @@ class RunPodManager:
                 "--trust-remote-code",
                 "--tool-call-parser", "pythonic",
                 "--enable-auto-tool-choice",
-                "--port", "8000",
-                "--enforce-eager"
+                "--enable-prefix-caching",
+                "--max-num-seqs", "32",
+                "--port", "8000"
             ],
             "env": {
                 # vllm/vllm-openai イメージはこれらの環境変数を読む
