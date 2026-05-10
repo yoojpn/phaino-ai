@@ -110,7 +110,7 @@ class ScanWorker:
                     async with _httpx.AsyncClient(timeout=30) as client:
                         r = await client.post(
                             f"{cpu_url}/codeql/start",
-                            json={"target": codeql_target},
+                            json={"target": codeql_target, "repo_url": target if target_type == "github" else ""},
                         )
                         codeql_job_id = r.json().get("job_id")
                     logger.info(f"  [DEBUG] codeql job_id: {codeql_job_id}")

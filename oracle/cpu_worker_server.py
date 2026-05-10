@@ -791,6 +791,7 @@ async def run_codeql(tmpdir: str, files, chunks) -> List[Dict]:
 
 class CodeQLRequest(BaseModel):
     target: str          # git clone済みのtmpdirパス or repo URL
+    repo_url: str = ""   # 元のリポジトリURL（cloneに使用）
     languages: List[str] = []  # 空の場合は自動検出
 
 class CodeQLResponse(BaseModel):
@@ -810,25 +811,31 @@ async def start_codeql(req: CodeQLRequest):
     _codeql_jobs[job_id] = {"status": "running", "results": [], "error": None}
 
     async def _run():
-        tmpdir_to_cleanup = None
+        clone_dir = None
         try:
             if not CODEQL_BIN.exists():
                 _codeql_jobs[job_id] = {"status": "done", "results": [], "error": "CodeQL not installed"}
                 return
 
-            if req.target.startswith("/"):
-                # /analyze から渡されたclone済みtmpdirパス
-                src_root = Path(req.target)
-                tmpdir_to_cleanup = req.target  # CodeQL完了後に削除
-            else:
-                clone_dir = tempfile.mkdtemp(prefix="codeql_clone_")
-                tmpdir_to_cleanup = clone_dir
-                proc = await asyncio.create_subprocess_exec(
-                    "git", "clone", "--depth=1", req.target, clone_dir,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-                await asyncio.wait_for(proc.communicate(), timeout=120)
-                src_root = Path(clone_dir)
+            # CodeQLはフルなリポジトリ構造が必要なので常にgit cloneする
+            # req.repo_url があればそちらを使い、なければreq.targetがURLの場合に使う
+            clone_url = req.repo_url or (req.target if not req.target.startswith("/") else "")
+            if not clone_url:
+                _codeql_jobs[job_id] = {"status": "done", "results": [], "error": "repo_url not provided"}
+                return
+
+            clone_dir = tempfile.mkdtemp(prefix="codeql_clone_")
+            logger.info(f"  [CodeQL] cloning: {clone_url}")
+            proc = await asyncio.create_subprocess_exec(
+                "git", "clone", "--depth=1", clone_url, clone_dir,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            if proc.returncode != 0:
+                _codeql_jobs[job_id] = {"status": "done", "results": [], "error": f"git clone failed: {stderr.decode()[-300:]}"}
+                return
+
+            src_root = Path(clone_dir)
 
             ext_map = {".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "cpp",
                        ".java": "java", ".py": "python", ".js": "javascript",
@@ -858,8 +865,8 @@ async def start_codeql(req: CodeQLRequest):
         except Exception as e:
             _codeql_jobs[job_id] = {"status": "done", "results": [], "error": str(e)}
         finally:
-            if tmpdir_to_cleanup:
-                shutil.rmtree(tmpdir_to_cleanup, ignore_errors=True)
+            if clone_dir:
+                shutil.rmtree(clone_dir, ignore_errors=True)
 
     asyncio.create_task(_run())
     return {"job_id": job_id}
@@ -1052,14 +1059,15 @@ async def analyze(req: AnalyzeRequest):
             f"source→sink {taint_summary['source_sink_pairs']}件"
         )
 
-        # tmpdirはCodeQL用に残す（/codeql/startに渡してCodeQL完了後に削除）
+        # tmpdirはCodeQL用には使わなくなったので削除
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         return AnalyzeResponse(
             chunks=chunk_data_list,
             call_graph=call_graph,
             reverse_graph=reverse_graph,
             taint_summary=taint_summary,
             file_count=len(files),
-            tmpdir=tmpdir,
         )
 
     except HTTPException:
