@@ -101,22 +101,32 @@ class ScanWorker:
                     resp.raise_for_status()
                     return resp.json()
 
-            async def _call_codeql():
+            async def _start_and_poll_codeql():
+                """CodeQLをバックグラウンド起動してポーリングで結果取得"""
                 try:
-                    async with _httpx.AsyncClient(timeout=900) as client:
-                        resp = await client.post(
-                            f"{cpu_url}/codeql",
+                    async with _httpx.AsyncClient(timeout=30) as client:
+                        r = await client.post(
+                            f"{cpu_url}/codeql/start",
                             json={"target": target},
                         )
-                        if resp.status_code == 200:
-                            return resp.json().get("results", [])
+                        codeql_job_id = r.json().get("job_id")
+                    if not codeql_job_id:
+                        return []
+                    # 最大10分ポーリング
+                    for _ in range(120):
+                        await asyncio.sleep(5)
+                        async with _httpx.AsyncClient(timeout=10) as client:
+                            r = await client.get(f"{cpu_url}/codeql/result/{codeql_job_id}")
+                            data = r.json()
+                            if data.get("status") == "done":
+                                return data.get("results", [])
                 except Exception as e:
-                    logger.warning(f"CodeQL endpoint failed: {e}")
+                    logger.warning(f"CodeQL polling failed: {e}")
                 return []
 
-            # /analyze と /codeql を並列実行
+            # /analyze と CodeQLポーリングを並列実行
             result, codeql_results = await asyncio.gather(
-                _call_analyze(), _call_codeql()
+                _call_analyze(), _start_and_poll_codeql()
             )
 
             # CPUポッドはLLM解析中も維持（ReActループのツール実行に使う）

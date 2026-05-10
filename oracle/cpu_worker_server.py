@@ -585,12 +585,12 @@ CODEQL_LANG_MAP = {
 
 # 言語別クエリスイート
 CODEQL_QUERY_SUITES = {
-    "python":     "codeql/python-queries:codeql-suites/python-security-and-quality.qls",
-    "javascript": "codeql/javascript-queries:codeql-suites/javascript-security-and-quality.qls",
-    "java":       "codeql/java-queries:codeql-suites/java-security-and-quality.qls",
-    "cpp":        "codeql/cpp-queries:codeql-suites/cpp-security-and-quality.qls",
-    "go":         "codeql/go-queries:codeql-suites/go-security-and-quality.qls",
-    "ruby":       "codeql/ruby-queries:codeql-suites/ruby-security-and-quality.qls",
+    "python":     "codeql/python-queries:codeql-suites/python-security-extended.qls",
+    "javascript": "codeql/javascript-queries:codeql-suites/javascript-security-extended.qls",
+    "java":       "codeql/java-queries:codeql-suites/java-security-extended.qls",
+    "cpp":        "codeql/cpp-queries:codeql-suites/cpp-security-extended.qls",
+    "go":         "codeql/go-queries:codeql-suites/go-security-extended.qls",
+    "ruby":       "codeql/ruby-queries:codeql-suites/ruby-security-extended.qls",
 }
 
 
@@ -783,6 +783,65 @@ class CodeQLRequest(BaseModel):
 class CodeQLResponse(BaseModel):
     results: List[Dict[str, Any]] = []
     error: Optional[str] = None
+
+
+# CodeQL バックグラウンドジョブ管理
+_codeql_jobs: Dict[str, Dict] = {}  # job_id -> {status, results, error}
+
+
+@app.post("/codeql/start")
+async def start_codeql(req: CodeQLRequest):
+    """CodeQL解析をバックグラウンドで開始してjob_idを返す"""
+    import uuid
+    job_id = str(uuid.uuid4())[:8]
+    _codeql_jobs[job_id] = {"status": "running", "results": [], "error": None}
+
+    async def _run():
+        try:
+            if not CODEQL_BIN.exists():
+                _codeql_jobs[job_id] = {"status": "done", "results": [], "error": "CodeQL not installed"}
+                return
+
+            if req.target.startswith("/"):
+                src_root = Path(req.target)
+            else:
+                tmpdir = tempfile.mkdtemp(prefix="codeql_clone_")
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "clone", "--depth=1", req.target, tmpdir,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=120)
+                src_root = Path(tmpdir)
+
+            ext_map = {".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "cpp",
+                       ".java": "java", ".py": "python", ".js": "javascript",
+                       ".ts": "javascript", ".go": "go", ".rb": "ruby"}
+            found = set()
+            for p in src_root.rglob("*"):
+                if p.suffix in ext_map:
+                    found.add(ext_map[p.suffix])
+            langs = req.languages or list(found)
+
+            class _DummyFile:
+                def __init__(self, lang): self.language = lang
+            dummy_files = [_DummyFile(l) for l in langs]
+
+            results = await run_codeql(str(src_root), dummy_files, [])
+            _codeql_jobs[job_id] = {"status": "done", "results": results, "error": None}
+        except Exception as e:
+            _codeql_jobs[job_id] = {"status": "done", "results": [], "error": str(e)}
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@app.get("/codeql/result/{job_id}")
+async def get_codeql_result(job_id: str):
+    """CodeQL解析結果をポーリングで取得"""
+    job = _codeql_jobs.get(job_id)
+    if not job:
+        return {"status": "not_found", "results": []}
+    return job
 
 
 @app.post("/codeql", response_model=CodeQLResponse)
