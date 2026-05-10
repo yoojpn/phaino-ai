@@ -776,6 +776,63 @@ async def run_codeql(tmpdir: str, files, chunks) -> List[Dict]:
     return all_results
 
 
+class CodeQLRequest(BaseModel):
+    target: str          # git clone済みのtmpdirパス or repo URL
+    languages: List[str] = []  # 空の場合は自動検出
+
+class CodeQLResponse(BaseModel):
+    results: List[Dict[str, Any]] = []
+    error: Optional[str] = None
+
+
+@app.post("/codeql", response_model=CodeQLResponse)
+async def run_codeql_endpoint(req: CodeQLRequest):
+    """
+    CodeQL解析を非同期で実行してSARIF結果を返す。
+    /analyze とは分離してCloudflareタイムアウトを回避。
+    """
+    try:
+        if not CODEQL_BIN.exists():
+            return CodeQLResponse(error="CodeQL not installed")
+
+        # target がパスならそのまま使う、URLならclone
+        if req.target.startswith("/"):
+            src_root = Path(req.target)
+        else:
+            tmpdir = tempfile.mkdtemp(prefix="codeql_clone_")
+            proc = await asyncio.create_subprocess_exec(
+                "git", "clone", "--depth=1", req.target, tmpdir,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=120)
+            src_root = Path(tmpdir)
+
+        # 言語を自動検出
+        if req.languages:
+            langs = req.languages
+        else:
+            # ファイル拡張子で検出
+            ext_map = {".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "cpp",
+                       ".java": "java", ".py": "python", ".js": "javascript",
+                       ".ts": "javascript", ".go": "go", ".rb": "ruby"}
+            found = set()
+            for p in src_root.rglob("*"):
+                if p.suffix in ext_map:
+                    found.add(ext_map[p.suffix])
+            langs = list(found)
+
+        # ダミーのfiles/chunksで run_codeql を呼ぶ
+        class _DummyFile:
+            def __init__(self, lang): self.language = lang
+        dummy_files = [_DummyFile(l) for l in langs]
+
+        results = await run_codeql(str(src_root), dummy_files, [])
+        return CodeQLResponse(results=results)
+
+    except Exception as e:
+        return CodeQLResponse(error=str(e))
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest):
     tmpdir = None
@@ -851,13 +908,8 @@ async def analyze(req: AnalyzeRequest):
 
         logger.info(f"  呼び出しグラフ: {len([v for v in call_graph.values() if v])}関数")
 
-        # Step3.5: CodeQL解析（利用可能な場合）
-        codeql_results = await run_codeql(tmpdir, files, chunks)
-        if codeql_results:
-            merge_codeql_results(chunks, codeql_results)
-            logger.info(f"  CodeQL: {len(codeql_results)}件のsource→sinkパスをマージ")
-        else:
-            logger.info("  CodeQL: スキップ（未インストールまたはエラー）")
+        # Step3.5: CodeQL解析はスキップ（/codeql エンドポイントで非同期実行）
+        # Cloudflareの100秒タイムアウトを避けるため分離
 
         # Step4: 多段taint伝播
         logger.info("  多段taint伝播開始...")

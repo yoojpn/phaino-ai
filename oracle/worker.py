@@ -91,17 +91,33 @@ class ScanWorker:
             self._log(job_id, f"  CPUポッド ready: {cpu_url}\n")
 
             self._log(job_id, "  git clone / AST解析 / 多段taint伝播 実行中...\n")
-            async with _httpx.AsyncClient(timeout=1800) as client:
-                resp = await client.post(
-                    f"{cpu_url}/analyze",
-                    json={
-                        "target": target,
-                        "target_type": target_type,
-                        "options": options,
-                    },
-                )
-                resp.raise_for_status()
-                result = resp.json()
+
+            async def _call_analyze():
+                async with _httpx.AsyncClient(timeout=1800) as client:
+                    resp = await client.post(
+                        f"{cpu_url}/analyze",
+                        json={"target": target, "target_type": target_type, "options": options},
+                    )
+                    resp.raise_for_status()
+                    return resp.json()
+
+            async def _call_codeql():
+                try:
+                    async with _httpx.AsyncClient(timeout=900) as client:
+                        resp = await client.post(
+                            f"{cpu_url}/codeql",
+                            json={"target": target},
+                        )
+                        if resp.status_code == 200:
+                            return resp.json().get("results", [])
+                except Exception as e:
+                    logger.warning(f"CodeQL endpoint failed: {e}")
+                return []
+
+            # /analyze と /codeql を並列実行
+            result, codeql_results = await asyncio.gather(
+                _call_analyze(), _call_codeql()
+            )
 
             # CPUポッドはLLM解析中も維持（ReActループのツール実行に使う）
             # 停止はLLM解析完了後
@@ -151,6 +167,14 @@ class ScanWorker:
                 c.codeql_confirmed = r.get("codeql_confirmed", False)
                 c.codeql_flow = r.get("codeql_flow", "")
                 chunks.append(c)
+
+            # CodeQL結果をchunksにマージ
+            if codeql_results:
+                from oracle.cpu_worker_server import merge_codeql_results
+                merge_codeql_results(chunks, codeql_results)
+                self._log(job_id, f"  CodeQL: {len(codeql_results)}件をマージ\n")
+            else:
+                self._log(job_id, "  CodeQL: 結果なし\n")
 
             # OmniscientContextをOracle側で再構築（call_graphはCPUポッドから受け取ったものを使用）
             omniscient = OmniscientContext(chunks)

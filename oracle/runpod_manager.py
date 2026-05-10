@@ -44,6 +44,7 @@ CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "300"))
 # 8vCPUs 16GB RAM $0.28/hr に対応するRunPodのCPUタイプ
 CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c")  # 有効値: cpu3c/cpu3g/cpu3m/cpu5c/cpu5g/cpu5m
 _CPU_POD_INLINE_SCRIPT = (
+    "set -e && "
     "apt-get update -qq && apt-get install -y -qq git curl zstd && "
     "pip uninstall -y tree-sitter tree-sitter-languages 2>/dev/null || true && "
     "pip install -q fastapi uvicorn PyGithub httpx pydantic beautifulsoup4 requests "
@@ -52,6 +53,8 @@ _CPU_POD_INLINE_SCRIPT = (
     "mkdir -p /workspace && cd /workspace && "
     "rm -rf vulnscan && "
     "git clone https://yoojpn:${GITHUB_TOKEN}@github.com/yoojpn/phaino-ai.git vulnscan && "
+    "test -f /workspace/vulnscan/oracle/cpu_worker_server.py || (echo 'ERROR: clone failed' && exit 1) && "
+    "echo '[CPU] clone OK: '$(git -C /workspace/vulnscan rev-parse --short HEAD) && "
     # CodeQLバンドルのダウンロード（未インストール時のみ）
     "if [ ! -f /workspace/codeql/codeql ]; then "
     "  echo '[CPU] CodeQLダウンロード中...' && "
