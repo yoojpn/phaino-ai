@@ -27,7 +27,7 @@ VALID_GPU_IDS = {
 RUNPOD_API_KEY      = os.getenv("RUNPOD_API_KEY", "")
 RUNPOD_POD_NAME     = os.getenv("RUNPOD_POD_NAME", "vulnscan")
 VLLM_PORT           = int(os.getenv("VLLM_PORT", "8000"))
-VLLM_HEALTH_TIMEOUT = int(os.getenv("VLLM_HEALTH_TIMEOUT", "900"))
+VLLM_HEALTH_TIMEOUT = int(os.getenv("VLLM_HEALTH_TIMEOUT", "1200"))
 RUNPOD_API_BASE     = "https://api.runpod.io/graphql"
 
 POD_IMAGE      = os.getenv("RUNPOD_IMAGE", "vllm/vllm-openai:latest")
@@ -443,7 +443,6 @@ class RunPodManager:
         while asyncio.get_event_loop().time() < deadline:
             if await self._check_vllm_health(vllm_url):
                 logger.info("vLLM healthy")
-                await asyncio.sleep(30)
                 return vllm_url
             await asyncio.sleep(5)
         raise RuntimeError("vLLM起動タイムアウト")
