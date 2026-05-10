@@ -448,7 +448,14 @@ Call report_vulnerability with your complete findings.
 """
 
 
-def build_attacker_prompt(chunk: FunctionChunk) -> str:
+def build_attacker_prompt(chunk: FunctionChunk, cross_file: str = "") -> str:
+    cross_file_section = f"\n## Cross-file Context\n{cross_file}\n" if cross_file else ""
+    taint_section = ""
+    if getattr(chunk, 'taint_sources', []) or getattr(chunk, 'taint_sinks', []):
+        taint_section = f"\n## Taint Info\nSources: {chunk.taint_sources}\nSinks: {chunk.taint_sinks}\n"
+    codeql_section = ""
+    if getattr(chunk, 'codeql_confirmed', False):
+        codeql_section = f"\n## CodeQL Finding\n{chunk.codeql_flow}\n"
     return f"""You are an experienced attacker targeting this {chunk.language} code.
 
 ## Function: {chunk.function_name} in {chunk.file_path}
@@ -456,7 +463,7 @@ def build_attacker_prompt(chunk: FunctionChunk) -> str:
 ```{chunk.language}
 {chunk.code}
 ```
-
+{taint_section}{codeql_section}{cross_file_section}
 ## Task
 Find something exploitable in this code. Forget CVE classifications.
 Look at the RAW STRUCTURE.
@@ -585,7 +592,7 @@ class VulnAnalyzer:
         if prompt_type == "structural":
             user_prompt = build_structural_prompt(chunk, cross_file)
         elif prompt_type == "attacker":
-            user_prompt = build_attacker_prompt(chunk)
+            user_prompt = build_attacker_prompt(chunk, cross_file)
         elif prompt_type == "php":
             user_prompt = build_php_prompt(chunk)
         else:
