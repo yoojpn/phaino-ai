@@ -755,7 +755,8 @@ async def run_codeql(tmpdir: str, files, chunks) -> List[Dict]:
                 suite,
                 "--format=sarif-latest",
                 f"--output={sarif_path}",
-                "--threads=4",
+                "--threads=2",
+                "--ram=512",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

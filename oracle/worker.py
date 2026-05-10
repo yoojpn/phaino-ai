@@ -113,8 +113,8 @@ class ScanWorker:
                     if not codeql_job_id:
                         return []
                     # 最大10分ポーリング
-                    for _ in range(120):
-                        await asyncio.sleep(5)
+                    for _ in range(60):
+                        await asyncio.sleep(10)
                         async with _httpx.AsyncClient(timeout=10) as client:
                             r = await client.get(f"{cpu_url}/codeql/result/{codeql_job_id}")
                             data = r.json()
