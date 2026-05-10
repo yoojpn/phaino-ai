@@ -40,7 +40,7 @@ CPU_POD_NAME        = os.getenv("CPU_POD_NAME", "vulnscan-cpu")
 CPU_POD_PORT        = int(os.getenv("CPU_POD_PORT", "8001"))
 CPU_POD_IMAGE       = os.getenv("CPU_POD_IMAGE", "python:3.11-slim")
 CPU_POD_DISK_SIZE   = int(os.getenv("CPU_POD_DISK_SIZE", "20"))
-CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "300"))
+CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "600"))
 # 8vCPUs 16GB RAM $0.28/hr に対応するRunPodのCPUタイプ
 CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu5c")  # 有効値: cpu3c/cpu3g/cpu3m/cpu5c/cpu5g/cpu5m
 _CPU_POD_INLINE_SCRIPT = (
