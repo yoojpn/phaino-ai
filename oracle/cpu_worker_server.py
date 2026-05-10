@@ -74,6 +74,7 @@ class AnalyzeResponse(BaseModel):
     reverse_graph: Dict[str, List[str]]  # 関数名 → 呼び出し元関数名リスト
     taint_summary: Dict[str, Any]        # サマリー統計
     file_count: int
+    tmpdir: Optional[str] = None         # clone済みtmpdirパス（CodeQL用）
     error: Optional[str] = None
 
 
@@ -809,21 +810,25 @@ async def start_codeql(req: CodeQLRequest):
     _codeql_jobs[job_id] = {"status": "running", "results": [], "error": None}
 
     async def _run():
+        tmpdir_to_cleanup = None
         try:
             if not CODEQL_BIN.exists():
                 _codeql_jobs[job_id] = {"status": "done", "results": [], "error": "CodeQL not installed"}
                 return
 
             if req.target.startswith("/"):
+                # /analyze から渡されたclone済みtmpdirパス
                 src_root = Path(req.target)
+                tmpdir_to_cleanup = req.target  # CodeQL完了後に削除
             else:
-                tmpdir = tempfile.mkdtemp(prefix="codeql_clone_")
+                clone_dir = tempfile.mkdtemp(prefix="codeql_clone_")
+                tmpdir_to_cleanup = clone_dir
                 proc = await asyncio.create_subprocess_exec(
-                    "git", "clone", "--depth=1", req.target, tmpdir,
+                    "git", "clone", "--depth=1", req.target, clone_dir,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
                 await asyncio.wait_for(proc.communicate(), timeout=120)
-                src_root = Path(tmpdir)
+                src_root = Path(clone_dir)
 
             ext_map = {".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "cpp",
                        ".java": "java", ".py": "python", ".js": "javascript",
@@ -842,6 +847,9 @@ async def start_codeql(req: CodeQLRequest):
             _codeql_jobs[job_id] = {"status": "done", "results": results, "error": None}
         except Exception as e:
             _codeql_jobs[job_id] = {"status": "done", "results": [], "error": str(e)}
+        finally:
+            if tmpdir_to_cleanup:
+                shutil.rmtree(tmpdir_to_cleanup, ignore_errors=True)
 
     asyncio.create_task(_run())
     return {"job_id": job_id}
@@ -1034,18 +1042,24 @@ async def analyze(req: AnalyzeRequest):
             f"source→sink {taint_summary['source_sink_pairs']}件"
         )
 
+        # tmpdirはCodeQL用に残す（/codeql/startに渡してCodeQL完了後に削除）
         return AnalyzeResponse(
             chunks=chunk_data_list,
             call_graph=call_graph,
             reverse_graph=reverse_graph,
             taint_summary=taint_summary,
             file_count=len(files),
+            tmpdir=tmpdir,
         )
 
     except HTTPException:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         raise
     except Exception as e:
         logger.exception(f"analyze失敗: {e}")
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         return AnalyzeResponse(
             chunks=[],
             call_graph={},
@@ -1054,9 +1068,6 @@ async def analyze(req: AnalyzeRequest):
             file_count=0,
             error=str(e),
         )
-    finally:
-        if tmpdir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @app.get("/health")
