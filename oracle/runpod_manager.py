@@ -169,10 +169,36 @@ class CpuPodManager:
                     async with httpx.AsyncClient() as client:
                         r = await client.get(f"{url}/health", timeout=5, follow_redirects=True)
                         info = r.json()
+                        pod_commit = info.get('commit', '?')
                         logger.info(
-                            f"[CPU] CPUワーカー ready | commit={info.get('commit','?')} "
+                            f"[CPU] CPUワーカー ready | commit={pod_commit} "
                             f"tree_sitter_languages={info.get('tree_sitter_languages','?')}"
                         )
+                        # コミットが古い場合はポッドを削除して新規作成
+                        try:
+                            import subprocess
+                            expected = subprocess.check_output(
+                                ["git", "-C", "/opt/vulnscan", "rev-parse", "--short", "HEAD"],
+                                stderr=subprocess.DEVNULL
+                            ).decode().strip()
+                        except Exception:
+                            expected = None
+                        if expected and pod_commit != expected:
+                            logger.warning(
+                                f"[CPU] commitミスマッチ: pod={pod_commit} oracle={expected} → ポッド再作成"
+                            )
+                            try:
+                                await self._delete_pod(self._pod_id)
+                            except Exception:
+                                pass
+                            self._pod_id = None
+                            logger.info("[CPU] CPUポッド新規作成中（commit更新）...")
+                            new_id = await self._create_pod()
+                            self._pod_id = new_id
+                            await self._wait_for_ip(new_id)
+                            url = self._worker_url()
+                            deadline = asyncio.get_event_loop().time() + CPU_POD_HEALTH_TIMEOUT
+                            continue
                 except Exception:
                     logger.info("[CPU] CPUワーカー ready")
                 return url
