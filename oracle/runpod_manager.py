@@ -73,7 +73,7 @@ _CPU_POD_INLINE_SCRIPT = (
     "  echo '[CPU] CodeQL既存 skip'; "
     "fi && "
     "cd /workspace/vulnscan && "
-    "exec uvicorn oracle.cpu_worker_server:app --host 0.0.0.0 --port ${CPU_POD_PORT:-8001} --workers 4"
+    "exec uvicorn oracle.cpu_worker_server:app --host 0.0.0.0 --port ${CPU_POD_PORT:-8001} --workers 1"
 )
 # dockerStartCmd は配列形式で渡す必要がある
 _env_cmd = os.getenv("CPU_POD_START_CMD")
