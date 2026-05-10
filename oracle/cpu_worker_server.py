@@ -78,6 +78,268 @@ class AnalyzeResponse(BaseModel):
 
 
 # ===========================
+# CPUポッド ツール実行エンドポイント
+# ReActループからの動的コード実行用
+# ===========================
+
+class ExecRequest(BaseModel):
+    code: str                        # 実行するコード（Python/Shell/C++）
+    language: str                    # "python" | "shell" | "cpp" | "c"
+    stdin: str = ""                  # 標準入力
+    timeout: int = 15
+
+class ExecResponse(BaseModel):
+    stdout: str
+    stderr: str
+    returncode: int
+    timed_out: bool = False
+
+class BuildAsanRequest(BaseModel):
+    repo_url: str                    # git clone済みの場合はパス、なければURL
+    target_file: str                 # ビルド対象ファイル（相対パス）
+    extra_flags: str = ""            # 追加コンパイルフラグ
+
+class BuildAsanResponse(BaseModel):
+    binary_path: str = ""
+    compile_output: str = ""
+    success: bool = False
+
+class FuzzRequest(BaseModel):
+    binary_path: str                 # ASANビルド済みバイナリのパス
+    harness_code: str = ""           # libFuzzerハーネスコード（空の場合はstdin fuzzing）
+    target_function: str = ""        # 対象関数名
+    source_code: str = ""            # ハーネスと結合するソースコード
+    language: str = "cpp"
+    timeout: int = 30
+
+class FuzzResponse(BaseModel):
+    crash_found: bool = False
+    crash_output: str = ""
+    crash_input: str = ""
+    output: str = ""
+
+
+# ビルド済みASANバイナリのキャッシュ（CPUポッドのメモリ内）
+_asan_cache: Dict[str, str] = {}  # repo_url+file → binary_path
+_repo_tmpdir: Optional[str] = None  # cloneしたリポジトリのtmpdir
+
+
+@app.post("/exec", response_model=ExecResponse)
+async def exec_code(req: ExecRequest):
+    """
+    ReActループからのコード実行リクエストを処理。
+    Python/Shell/C++を安全に実行して結果を返す。
+    """
+    try:
+        if req.language == "python":
+            proc = await asyncio.create_subprocess_exec(
+                "python3", "-c", req.code,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        elif req.language == "shell":
+            proc = await asyncio.create_subprocess_shell(
+                req.code,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        elif req.language in ("cpp", "c"):
+            # C/C++はコンパイルして実行
+            ext = ".cpp" if req.language == "cpp" else ".c"
+            compiler = "g++" if req.language == "cpp" else "gcc"
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="w") as f:
+                f.write(req.code)
+                src = f.name
+            out = src.replace(ext, "")
+            compile_proc = await asyncio.create_subprocess_exec(
+                compiler, "-o", out, src, "-fsanitize=address", "-O1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            cout, cerr = await asyncio.wait_for(compile_proc.communicate(), timeout=30)
+            if compile_proc.returncode != 0:
+                return ExecResponse(stdout="", stderr=cerr.decode(), returncode=1)
+            proc = await asyncio.create_subprocess_exec(
+                out,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            return ExecResponse(stdout="", stderr=f"unsupported language: {req.language}", returncode=1)
+
+        stdin_data = req.stdin.encode() if req.stdin else b""
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(stdin_data), timeout=req.timeout
+            )
+            return ExecResponse(
+                stdout=stdout.decode(errors="replace")[:4000],
+                stderr=stderr.decode(errors="replace")[:2000],
+                returncode=proc.returncode,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            return ExecResponse(stdout="", stderr="timeout", returncode=-1, timed_out=True)
+
+    except Exception as e:
+        return ExecResponse(stdout="", stderr=str(e), returncode=-1)
+
+
+@app.post("/build_asan", response_model=BuildAsanResponse)
+async def build_asan(req: BuildAsanRequest):
+    """
+    対象リポジトリをASAN付きでビルドしてバイナリパスを返す。
+    CPUポッドのtmpdirを再利用する。
+    """
+    cache_key = f"{req.repo_url}::{req.target_file}"
+    if cache_key in _asan_cache:
+        return BuildAsanResponse(
+            binary_path=_asan_cache[cache_key],
+            compile_output="(cached)",
+            success=True,
+        )
+
+    # repo_url がパスの場合はそのまま使う
+    if req.repo_url.startswith("/"):
+        src_root = Path(req.repo_url)
+    else:
+        # 既存のclone済みtmpdirを探す
+        src_root = Path("/tmp") / "asan_build"
+        src_root.mkdir(exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth=1", req.repo_url, str(src_root / "repo"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=120)
+        src_root = src_root / "repo"
+
+    target = src_root / req.target_file
+    if not target.exists():
+        return BuildAsanResponse(compile_output=f"file not found: {target}", success=False)
+
+    ext = target.suffix
+    compiler = "g++" if ext in (".cpp", ".cc", ".cxx") else "gcc"
+    out_path = f"/tmp/asan_{target.stem}"
+
+    proc = await asyncio.create_subprocess_exec(
+        compiler, "-fsanitize=address,undefined", "-O1", "-g",
+        str(target), "-o", out_path,
+        *(req.extra_flags.split() if req.extra_flags else []),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        return BuildAsanResponse(compile_output="build timeout", success=False)
+
+    if proc.returncode == 0:
+        _asan_cache[cache_key] = out_path
+        return BuildAsanResponse(
+            binary_path=out_path,
+            compile_output=stderr.decode()[:1000],
+            success=True,
+        )
+    return BuildAsanResponse(
+        compile_output=stderr.decode()[:2000],
+        success=False,
+    )
+
+
+@app.post("/fuzz", response_model=FuzzResponse)
+async def fuzz_target(req: FuzzRequest):
+    """
+    libFuzzerでクラッシュを探す。
+    harness_codeが提供された場合はlibFuzzerハーネスとしてコンパイル・実行。
+    """
+    if req.language not in ("c", "cpp"):
+        return FuzzResponse(output="libFuzzer: C/C++のみ対応")
+
+    ext = ".cpp" if req.language == "cpp" else ".c"
+    compiler = "clang++" if req.language == "cpp" else "clang"
+
+    work_dir = Path(tempfile.mkdtemp(prefix="fuzz_"))
+    try:
+        if req.harness_code:
+            # ハーネス + ソースコードを結合してlibFuzzerバイナリを作成
+            combined = f"{req.source_code}\n\n{req.harness_code}"
+            src = work_dir / f"fuzz_target{ext}"
+            src.write_text(combined)
+
+            out = work_dir / "fuzz_bin"
+            proc = await asyncio.create_subprocess_exec(
+                compiler, "-fsanitize=fuzzer,address", "-O1",
+                str(src), "-o", str(out),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            cout, cerr = await asyncio.wait_for(proc.communicate(), timeout=60)
+            if proc.returncode != 0:
+                return FuzzResponse(output=f"compile error:\n{cerr.decode()[:1000]}")
+
+            corpus = work_dir / "corpus"
+            corpus.mkdir()
+            (corpus / "seed").write_bytes(b"AAAA")
+
+            proc = await asyncio.create_subprocess_exec(
+                str(out),
+                f"-max_total_time={req.timeout}",
+                "-max_len=4096",
+                "-print_final_stats=1",
+                str(corpus),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=req.timeout + 10
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                stdout, stderr = b"", b"timeout"
+
+            output = (stdout + stderr).decode(errors="replace")
+            crash_found = any(k in output.lower() for k in [
+                "heap-buffer-overflow", "stack-buffer-overflow", "use-after-free",
+                "segfault", "==error:", "crash_", "signal 11", "addresssanitizer",
+            ])
+            return FuzzResponse(
+                crash_found=crash_found,
+                crash_output=output[-2000:] if crash_found else "",
+                output=output[-1000:],
+            )
+
+        elif req.binary_path and Path(req.binary_path).exists():
+            # 既存バイナリを直接fuzz
+            corpus = work_dir / "corpus"
+            corpus.mkdir()
+            (corpus / "seed").write_bytes(b"AAAA")
+            proc = await asyncio.create_subprocess_exec(
+                req.binary_path,
+                f"-max_total_time={req.timeout}",
+                str(corpus),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=req.timeout + 10
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                stdout, stderr = b"", b"timeout"
+            output = (stdout + stderr).decode(errors="replace")
+            crash_found = "crash_" in output or "==error:" in output.lower()
+            return FuzzResponse(crash_found=crash_found, output=output[-1000:])
+
+        return FuzzResponse(output="binary_path or harness_code required")
+
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# ===========================
 # 多段Taint伝播エンジン
 # ===========================
 

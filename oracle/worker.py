@@ -103,9 +103,9 @@ class ScanWorker:
                 resp.raise_for_status()
                 result = resp.json()
 
-            # CPUポッドは解析完了後すぐ停止（課金節約）
-            await self.cpu_manager.stop_pod()
-            self._log(job_id, "  CPUポッド停止\n")
+            # CPUポッドはLLM解析中も維持（ReActループのツール実行に使う）
+            # 停止はLLM解析完了後
+            self._log(job_id, "  CPUポッド: AST解析完了（LLM解析中も維持）\n")
 
             if result.get("error"):
                 raise ValueError(f"CPUワーカーエラー: {result['error']}")
@@ -228,14 +228,35 @@ class ScanWorker:
             os.environ["LLM_BASE_URL"] = vllm_url
 
             llm_analyzer = VulnAnalyzer()
-            total_single   = len(chunks)
+
+            # 高優先度（CodeQL確認済み）はReActループで先に処理
+            react_chunks = [
+                c for c in chunks
+                if getattr(c, 'codeql_confirmed', False) or (
+                    getattr(c, 'propagated_sources', []) and c.taint_sinks
+                )
+            ][:20]  # 最大20件（コスト制御）
+            remaining_chunks = [c for c in chunks if c not in set(react_chunks)]
+
+            react_vulns: List[VulnSample] = []
+            if react_chunks:
+                self._log(job_id, f"  ReActループ: {len(react_chunks)}件の高優先度関数を先行解析...\n")
+                react_loop = ReActLoop(cpu_url=cpu_url)
+                react_tasks = [react_loop.run_on_chunk(c, omniscient) for c in react_chunks]
+                react_results = await asyncio.gather(*react_tasks, return_exceptions=True)
+                for r in react_results:
+                    if isinstance(r, VulnSample) and r.label.is_vulnerable:
+                        react_vulns.append(r)
+                self._log(job_id, f"  ReActループ完了: {len(react_vulns)}件検出\n")
+
+            total_single   = len(remaining_chunks)
             total_compound = total_group_count
-            total_funcs    = total_single + total_compound
-            self._log(job_id, f"  LLM: 0/{total_funcs} 関数完了 | 脆弱性候補: 0件\n")
+            total_funcs    = total_single + total_compound + len(react_chunks)
+            self._log(job_id, f"  LLM: {len(react_chunks)}/{total_funcs} 関数完了 | 脆弱性候補: {len(react_vulns)}件\n")
 
             counter_lock   = asyncio.Lock()
-            single_done    = [0]
-            single_vulns   = [0]
+            single_done    = [len(react_chunks)]
+            single_vulns   = [len(react_vulns)]
             compound_done  = [0]
             compound_vulns = [0]
 
@@ -247,8 +268,8 @@ class ScanWorker:
 
             async def batch_progress(done, total, vulns):
                 async with counter_lock:
-                    single_done[0]  = done
-                    single_vulns[0] = vulns
+                    single_done[0]  = len(react_chunks) + done
+                    single_vulns[0] = len(react_vulns) + vulns
                 await _log_progress()
 
             async def run_compound():
@@ -258,33 +279,46 @@ class ScanWorker:
                     (class_groups, "compound"),
                     (taint_chain_groups, "taint_chain"),
                 ]
+                # 全グループを並列実行（直列ではなく並列化）
+                async def _run_group(group, gtype):
+                    from analyzer.llm import build_compound_prompt
+                    prompt = build_compound_prompt(group, group_type=gtype)
+                    r = await llm_analyzer._call_llm(
+                        prompt, group[0], is_compound=True, compound_group=group
+                    )
+                    async with counter_lock:
+                        compound_done[0] += 1
+                        if r and r.label.is_vulnerable:
+                            compound_vulns[0] += 1
+                    await _log_progress()
+                    return r
+
+                tasks = []
                 for groups, gtype in all_groups:
                     for group in groups:
-                        from analyzer.llm import build_compound_prompt
-                        prompt = build_compound_prompt(group, group_type=gtype)
-                        r = await llm_analyzer._call_llm(
-                            prompt, group[0], is_compound=True, compound_group=group
-                        )
-                        async with counter_lock:
-                            compound_done[0] += 1
-                            if r and r.label.is_vulnerable:
-                                compound_vulns[0] += 1
-                                results.append(r)
-                        await _log_progress()
+                        tasks.append(_run_group(group, gtype))
+                group_results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in group_results:
+                    if isinstance(r, VulnSample) and r.label.is_vulnerable:
+                        results.append(r)
                 return results
 
             single_results, compound_results = await asyncio.gather(
                 llm_analyzer.analyze_batch(
-                    chunks, progress_callback=batch_progress, omniscient=omniscient
+                    remaining_chunks, progress_callback=batch_progress, omniscient=omniscient
                 ),
                 run_compound(),
             )
 
-            all_vulns: List[VulnSample] = single_results + compound_results
+            # CPUポッドをLLM解析完了後に停止
+            await self.cpu_manager.stop_pod()
+            self._log(job_id, "  CPUポッド停止\n")
+
+            all_vulns: List[VulnSample] = react_vulns + single_results + compound_results
             self._log(
                 job_id,
                 f"  脆弱性候補: {len(all_vulns)}件 "
-                f"(単一:{len(single_results)} 複合:{len(compound_results)})\n",
+                f"(ReAct:{len(react_vulns)} 単一:{len(single_results)} 複合:{len(compound_results)})\n",
             )
 
             # ===========================
@@ -327,7 +361,9 @@ class ScanWorker:
                         [s for s in all_vulns if id(s) not in react_ids]
                         + list(react_results)
                     )
-                    await self.manager.stop_pod()
+
+            # GPUポッドは必ずここで停止
+            await self.manager.stop_pod()
 
             # ===========================
             # Step 7: フィルタ
@@ -419,6 +455,12 @@ class ScanWorker:
                 log_append=f"\n[ERROR] {e}\n",
             )
         finally:
+            # フェイルセーフ: 何があっても両ポッドを停止
+            for mgr in (self.cpu_manager, self.manager):
+                try:
+                    await mgr.stop_pod()
+                except Exception:
+                    pass
             self._current_job_id = None
 
     def _log(self, job_id: str, msg: str):

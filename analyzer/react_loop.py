@@ -236,13 +236,251 @@ Your goal is to CONFIRM exploitability of a reported vulnerability by actually r
 
 class ReActLoop:
 
-    def __init__(self, docker_executor):
+    def __init__(self, docker_executor=None, cpu_url: str = ""):
         self.client = AsyncOpenAI(
             base_url=LLM_BASE_URL,
             api_key=LLM_API_KEY,
         )
         self.model  = LLM_MODEL
         self.docker = docker_executor
+        self.cpu_url = cpu_url  # CPUポッドのURL（exec/fuzz用）
+
+    async def run_on_chunk(self, chunk, omniscient=None) -> Optional[VulnSample]:
+        """
+        FunctionChunkを直接受け取り、LLMが仮説→実行→検証するReActループを回す。
+        VulnSampleを生成して返す（脆弱性なしの場合はNone）。
+        """
+        import httpx
+        from schema import (
+            VulnSample, VulnLabel, AttackModel, AttackScenario,
+            VulnAnalysis, VulnReasoning, VulnContext, Exploitability,
+            AttackType, Severity, Language,
+        )
+        from analyzer.llm import build_attacker_prompt
+
+        fn = chunk.function_name
+        lang = chunk.language
+        print(f"[*] ReAct on chunk: {fn} ({lang})")
+
+        # CPUポッドの /exec を叩くツールを動的に定義
+        cpu_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "exec_code",
+                    "description": "Execute Python/Shell/C++ code in the CPU sandbox and get the output. Use to test exploits, run scripts, check behavior.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {"type": "string", "description": "Code to execute"},
+                            "language": {"type": "string", "enum": ["python", "shell", "cpp", "c"], "description": "Language of the code"},
+                            "stdin": {"type": "string", "description": "Optional stdin input"},
+                        },
+                        "required": ["code", "language"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fuzz_function",
+                    "description": "Run libFuzzer on a C/C++ function with a custom harness to find memory corruption bugs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "harness_code": {"type": "string", "description": "libFuzzer LLVMFuzzerTestOneInput harness code"},
+                            "source_code": {"type": "string", "description": "The target function source code to compile with the harness"},
+                            "timeout": {"type": "integer", "description": "Fuzzing timeout in seconds", "default": 20},
+                        },
+                        "required": ["harness_code"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "report_finding",
+                    "description": "Report whether a vulnerability was confirmed or not.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "vulnerable": {"type": "boolean"},
+                            "cwe": {"type": "string", "description": "e.g. CWE-787"},
+                            "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                            "evidence": {"type": "string", "description": "Concrete evidence from tool output"},
+                            "exploit_code": {"type": "string", "description": "Working exploit or PoC"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["vulnerable"],
+                    },
+                },
+            },
+        ]
+
+        cross_file = omniscient.get_cross_file_context(chunk, max_chars=3000) if omniscient else ""
+        taint_info = ""
+        if getattr(chunk, 'taint_sources', []) or getattr(chunk, 'taint_sinks', []):
+            taint_info = f"\nTaint sources: {chunk.taint_sources}\nTaint sinks: {chunk.taint_sinks}"
+        codeql_info = ""
+        if getattr(chunk, 'codeql_confirmed', False):
+            codeql_info = f"\nCodeQL finding: {chunk.codeql_flow}"
+
+        system_prompt = """\
+You are an expert vulnerability researcher. Analyze the given function and use the tools to:
+1. Hypothesize a vulnerability based on the code
+2. Write and execute exploit/test code to confirm it
+3. For C/C++ memory bugs, use fuzz_function with a libFuzzer harness
+4. Report your finding with report_finding
+
+Be concrete and efficient. Maximum 16 steps."""
+
+        user_msg = f"""## Function: {fn} in {chunk.file_path}
+
+```{lang}
+{chunk.code[:2000]}
+```
+{taint_info}{codeql_info}
+{f"## Cross-file context{chr(10)}{cross_file}" if cross_file else ""}
+
+Analyze this function for security vulnerabilities. Start with the most likely attack vector."""
+
+        messages: List[Dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
+        found_sample = None
+
+        for step in range(16):
+            try:
+                resp = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=cpu_tools,
+                    tool_choice="required",
+                    max_tokens=1024,
+                    temperature=0.1,
+                    extra_body={"chat_template_kwargs": {"thinking": False}},
+                )
+            except Exception as e:
+                print(f"  [-] ReAct LLMエラー: {e}")
+                break
+
+            assistant_msg = resp.choices[0].message
+            messages.append(assistant_msg.model_dump(exclude_none=True))
+
+            if not assistant_msg.tool_calls:
+                break
+
+            done = False
+            for tc in assistant_msg.tool_calls:
+                tool_name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+
+                print(f"  → {tool_name}")
+
+                if tool_name == "report_finding":
+                    if args.get("vulnerable"):
+                        from schema import Language as Lang
+                        try:
+                            lang_enum = Lang(lang)
+                        except Exception:
+                            lang_enum = Lang.PYTHON
+                        found_sample = VulnSample(
+                            code=chunk.code,
+                            language=lang_enum,
+                            label=VulnLabel(
+                                is_vulnerable=True,
+                                cwe=args.get("cwe", "CWE-Unknown"),
+                                severity=Severity(args.get("severity", "medium")),
+                            ),
+                            attack_model=AttackModel(
+                                type=AttackType.OVERFLOW if lang in ("c", "cpp") else AttackType.RCE,
+                                exploitability=Exploitability.CONFIRMED if args.get("evidence") else Exploitability.PRACTICAL,
+                            ),
+                            attack_scenario=AttackScenario(
+                                steps=[args.get("description", "")],
+                                poc_script=args.get("exploit_code", ""),
+                            ),
+                            analysis=VulnAnalysis(
+                                input="user input",
+                                sink=chunk.function_name,
+                                flow=[chunk.function_name],
+                            ),
+                            reasoning=VulnReasoning(
+                                why_vulnerable=args.get("description", ""),
+                                why_exploitable=args.get("evidence", ""),
+                                false_positive_risk="",
+                            ),
+                            context=VulnContext(
+                                function=chunk.function_name,
+                                file=chunk.file_path,
+                                confidence=80,
+                            ),
+                        )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps({"status": "reported"}),
+                    })
+                    done = True
+                    break
+
+                elif tool_name == "exec_code" and self.cpu_url:
+                    try:
+                        async with httpx.AsyncClient(timeout=30) as client:
+                            r = await client.post(f"{self.cpu_url}/exec", json={
+                                "code": args.get("code", ""),
+                                "language": args.get("language", "python"),
+                                "stdin": args.get("stdin", ""),
+                            })
+                            result_data = r.json()
+                            tool_result = f"stdout:\n{result_data.get('stdout', '')}\nstderr:\n{result_data.get('stderr', '')}\nreturncode: {result_data.get('returncode', -1)}"
+                    except Exception as e:
+                        tool_result = f"exec error: {e}"
+
+                elif tool_name == "fuzz_function" and self.cpu_url:
+                    try:
+                        async with httpx.AsyncClient(timeout=60) as client:
+                            r = await client.post(f"{self.cpu_url}/fuzz", json={
+                                "harness_code": args.get("harness_code", ""),
+                                "source_code": args.get("source_code", chunk.code),
+                                "language": lang if lang in ("c", "cpp") else "cpp",
+                                "timeout": args.get("timeout", 20),
+                            })
+                            result_data = r.json()
+                            if result_data.get("crash_found"):
+                                tool_result = f"CRASH FOUND:\n{result_data.get('crash_output', '')}"
+                            else:
+                                tool_result = f"No crash found.\n{result_data.get('output', '')}"
+                    except Exception as e:
+                        tool_result = f"fuzz error: {e}"
+
+                else:
+                    tool_result = f"tool {tool_name} unavailable (no cpu_url or unknown tool)"
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": str(tool_result)[:2000],
+                })
+
+                # クラッシュ自動検知
+                if any(k in str(tool_result).lower() for k in [
+                    "heap-buffer-overflow", "stack-buffer-overflow", "use-after-free",
+                    "crash found", "segfault", "==error:"
+                ]):
+                    print(f"  [✓] ReAct自動クラッシュ検知: {fn}")
+                    done = True
+                    break
+
+            if done:
+                break
+
+        return found_sample
 
     async def run(
         self,
