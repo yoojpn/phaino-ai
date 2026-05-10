@@ -73,14 +73,13 @@ class ScanWorker:
         try:
             import httpx as _httpx
 
-            from analyzer.llm import VulnAnalyzer, OmniscientContext
+            from analyzer.llm import VulnAnalyzer, OmniscientContext, verify_findings_batch, rank_files_by_risk
             from analyzer.react_loop import ReActLoop
-            from sandbox.attacker import DockerExecutor
-            from sandbox.verifier import SandboxVerifier
             from reporter.report import ReportGenerator
             from parser.ast_parser import FunctionChunk
             from schema import VulnSample, Exploitability, Severity
-            from config import MAX_PARALLEL_DOCKER
+            from openai import AsyncOpenAI
+            from config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
 
             # ===========================
             # Step 1-3: CPUポッドで実行
@@ -269,6 +268,24 @@ class ScanWorker:
 
             llm_analyzer = VulnAnalyzer()
 
+            # Mythosスタイル: ファイルランキングエージェントで優先度を補正
+            # 解析前にLLMがファイルを1-5でスコアリングして高リスクから優先解析
+            try:
+                file_list = list(set(c.file_path for c in chunks))
+                file_rankings = await rank_files_by_risk(llm_analyzer.client, LLM_MODEL, file_list)
+                if file_rankings:
+                    for c in chunks:
+                        # ファイルリスクスコア(1-5)でchunkのpriorityを補正
+                        # スコア5=最高リスク → priorityを下げる（低いほど優先）
+                        fname = c.file_path.split("/")[-1]
+                        score = file_rankings.get(fname) or file_rankings.get(c.file_path) or 3
+                        file_risk_adj = max(0, 3 - score)  # score5→-2, score1→+2
+                        c.priority = max(1, min(9, c.priority + file_risk_adj))
+                    chunks.sort(key=lambda x: x.priority)
+                    self._log(job_id, f"  ファイルランキング完了: {len(file_rankings)}ファイルをスコアリング\n")
+            except Exception as e:
+                logger.warning(f"ファイルランキングエラー: {e}")
+
             # 高優先度（CodeQL確認済み）はReActループで先に処理
             react_chunks = [
                 c for c in chunks
@@ -363,24 +380,50 @@ class ScanWorker:
             )
 
             # ===========================
-            # Step 5: Dockerサンドボックス検証
+            # Step 5: CPUポッドでASan/libFuzzer検証
+            # (Docker不要 — CPUポッドの /exec /fuzz を使う)
+            # Mythosと同じ戦略: ASanをクラッシュオラクルとして使い
+            # ハルシネーションと本物のバグを分離する
             # ===========================
-            no_docker = options.get("no_docker", False)
-            if not no_docker and all_vulns:
-                self._log(job_id, "\n[Step 7] Dockerサンドボックス検証...\n")
-                docker = DockerExecutor()
-                verifier = SandboxVerifier(docker)
-                all_vulns = await verifier.verify_batch(
-                    all_vulns, concurrency=MAX_PARALLEL_DOCKER
-                )
-                confirmed = sum(
-                    1 for s in all_vulns
-                    if s.attack_model.exploitability == Exploitability.CONFIRMED
-                )
-                self._log(job_id, f"  confirmed: {confirmed}件\n")
+            llm_client = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+
+            if all_vulns:
+                self._log(job_id, "\n[Step 5] CPUポッドでASan/libFuzzer検証...\n")
+                cpp_vulns = [s for s in all_vulns if s.language.value in ("c", "cpp")]
+                other_vulns = [s for s in all_vulns if s.language.value not in ("c", "cpp")]
+
+                confirmed_cpp = []
+                if cpp_vulns and cpu_url:
+                    for s in cpp_vulns:
+                        try:
+                            # C/C++はCPUポッドの/execでASanコンパイル実行
+                            async with _httpx.AsyncClient(timeout=60) as client:
+                                r = await client.post(f"{cpu_url}/exec", json={
+                                    "code": s.code,
+                                    "language": "c" if s.language.value == "c" else "cpp",
+                                    "stdin": "",
+                                })
+                            d = r.json()
+                            asan_out = d.get("stderr", "") + d.get("stdout", "")
+                            crash_indicators = [
+                                "heap-buffer-overflow", "stack-buffer-overflow",
+                                "use-after-free", "segmentation fault",
+                                "==error:", "AddressSanitizer", "signal 11",
+                            ]
+                            if any(k.lower() in asan_out.lower() for k in crash_indicators):
+                                s.attack_model.exploitability = Exploitability.CONFIRMED
+                                s.attack_scenario.poc_script = f"# ASan crash confirmed\n{asan_out[:800]}"
+                                self._log(job_id, f"  [✓] ASan確認: {s.context.function if s.context else '?'}\n")
+                        except Exception as e:
+                            logger.warning(f"ASan exec error: {e}")
+                        confirmed_cpp.append(s)
+                    all_vulns = confirmed_cpp + other_vulns
+
+                confirmed = sum(1 for s in all_vulns if s.attack_model.exploitability == Exploitability.CONFIRMED)
+                self._log(job_id, f"  ASan/libFuzzer完了: {confirmed}件confirmed\n")
 
             # ===========================
-            # Step 6: ReActループ
+            # Step 6: ReActループ (CPUポッドの /exec /fuzz を使用)
             # ===========================
             no_react = options.get("no_react", False)
             if not no_react:
@@ -392,9 +435,9 @@ class ScanWorker:
                     )
                 ][:5]
                 if react_targets:
-                    self._log(job_id, f"\n[Step 8] ReActループ ({len(react_targets)}件)...\n")
-                    docker = DockerExecutor()
-                    react_loop = ReActLoop(docker)
+                    self._log(job_id, f"\n[Step 6] ReActループ ({len(react_targets)}件)...\n")
+                    # CPUポッドのURLをReActLoopに渡す（Docker不要）
+                    react_loop = ReActLoop(cpu_url=cpu_url)
                     react_tasks = [react_loop.run(s) for s in react_targets]
                     react_results = await asyncio.gather(*react_tasks)
                     react_ids = {id(s) for s in react_targets}
@@ -402,6 +445,16 @@ class ScanWorker:
                         [s for s in all_vulns if id(s) not in react_ids]
                         + list(react_results)
                     )
+
+            # ===========================
+            # Step 6.5: 検証エージェント（Mythosスタイルのセカンドパス）
+            # 「本当に重要か？」を確認してFPを除去
+            # ===========================
+            if all_vulns:
+                self._log(job_id, "\n[Step 6.5] 検証エージェント（セカンドパス）...\n")
+                from analyzer.llm import verify_findings_batch
+                all_vulns = await verify_findings_batch(llm_client, LLM_MODEL, all_vulns)
+                self._log(job_id, f"  検証後: {len(all_vulns)}件\n")
 
             # GPUポッドは必ずここで停止
             await self.manager.stop_pod()

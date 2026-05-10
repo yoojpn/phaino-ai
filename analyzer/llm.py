@@ -672,7 +672,16 @@ class VulnAnalyzer:
     ) -> Optional[VulnSample]:
         """
         tool calling（report_vulnerability）で構造化出力を強制してVulnSampleに変換
+        高優先度チャンク（priority<=2 or CodeQL確認済み）はthinking modeで深く推論する
         """
+        # Mythosと同じ戦略: 高優先度チャンクは推論を深くする
+        use_thinking = (
+            chunk.priority <= 2
+            or getattr(chunk, 'codeql_confirmed', False)
+            or (getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks)
+        )
+        thinking_kwargs = {"thinking": True, "thinking_budget": 2048} if use_thinking else {"thinking": False}
+
         try:
             resp = await self.client.chat.completions.create(
                 model=self.model,
@@ -682,10 +691,10 @@ class VulnAnalyzer:
                 ],
                 tools=[REPORT_TOOL],
                 tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-                max_tokens=1500,
+                max_tokens=3000 if use_thinking else 1500,
                 temperature=0.1,
                 extra_body={
-                    "chat_template_kwargs": {"thinking": False},
+                    "chat_template_kwargs": thinking_kwargs,
                 },
             )
 
@@ -720,7 +729,7 @@ class VulnAnalyzer:
                         tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
                         max_tokens=1500,
                         temperature=0.1,
-                        extra_body={"chat_template_kwargs": {"thinking": False}},
+                        extra_body={"chat_template_kwargs": {"thinking": False}},  # リトライはthinkingなし
                     )
                     msg = resp.choices[0].message
                     if msg.tool_calls:
@@ -818,3 +827,171 @@ class VulnAnalyzer:
         except Exception as e:
             print(f"  [-] JSONフォールバックエラー: {e}")
             return None
+
+
+# ===========================
+# Mythosスタイル: 検証エージェント（セカンドパス）
+# ===========================
+
+VERIFICATION_SYSTEM_PROMPT = """\
+You are a senior security triager. You receive a vulnerability report and must decide:
+1. Is this a REAL, exploitable vulnerability?
+2. Is it interesting and high-severity enough to report?
+
+Be skeptical. False positives waste time. Only approve bugs that:
+- Have a clear, realistic attack path
+- Affect real users in real scenarios
+- Are not mitigated by framework/middleware
+
+Respond with JSON only: {"approved": true/false, "reason": "...", "adjusted_severity": "critical|high|medium|low|none"}
+"""
+
+async def verify_finding(
+    client,
+    model: str,
+    sample: VulnSample,
+) -> tuple[bool, str]:
+    """
+    Mythosスタイルの検証エージェント。
+    発見した脆弱性に対して「本当に重要か？」を確認してFPを除去する。
+    """
+    report_text = f"""## Bug Report
+
+Function: {sample.context.function if sample.context else "unknown"}
+File: {sample.context.file if sample.context else "unknown"}
+CWE: {sample.label.cwe if sample.label else "unknown"}
+Severity: {sample.label.severity.value if sample.label and sample.label.severity else "unknown"}
+
+Why vulnerable: {sample.reasoning.why_vulnerable[:500] if sample.reasoning else ""}
+Why exploitable: {sample.reasoning.why_exploitable[:300] if sample.reasoning else ""}
+False positive risk: {sample.reasoning.false_positive_risk[:200] if sample.reasoning else ""}
+
+Attack steps:
+{chr(10).join(f"  {i+1}. {s}" for i, s in enumerate((sample.attack_scenario.steps or [])[:5]))}
+
+Code (excerpt):
+```
+{sample.code[:600]}
+```
+"""
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": VERIFICATION_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Please triage this bug report:\n\n{report_text}"},
+            ],
+            max_tokens=300,
+            temperature=0.1,
+            extra_body={"chat_template_kwargs": {"thinking": False}},
+        )
+        raw = resp.choices[0].message.content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw)
+        approved = data.get("approved", True)
+        reason = data.get("reason", "")
+        adj_sev = data.get("adjusted_severity", "")
+        # severityを調整
+        if adj_sev and adj_sev != "none" and sample.label:
+            try:
+                sample.label.severity = Severity(adj_sev)
+            except Exception:
+                pass
+        return approved, reason
+    except Exception as e:
+        # 検証エラーは保守的にapprove
+        return True, f"verification error: {e}"
+
+
+async def verify_findings_batch(
+    client,
+    model: str,
+    samples: List[VulnSample],
+) -> List[VulnSample]:
+    """
+    発見した全脆弱性を検証エージェントでフィルタリングする。
+    Mythosの「最後にエージェントを走らせて重要度が低いものを除外」に相当。
+    """
+    if not samples:
+        return samples
+
+    print(f"[*] 検証エージェント: {len(samples)}件をセカンドパスで確認...")
+    tasks = [verify_finding(client, model, s) for s in samples]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    approved = []
+    rejected = 0
+    for sample, result in zip(samples, results):
+        if isinstance(result, Exception):
+            approved.append(sample)  # エラーは保守的にapprove
+            continue
+        ok, reason = result
+        if ok:
+            approved.append(sample)
+        else:
+            rejected += 1
+            print(f"  [-] 検証エージェントがリジェクト: {sample.context.function if sample.context else '?'} — {reason[:80]}")
+
+    print(f"[+] 検証完了: {len(approved)}件承認 / {rejected}件リジェクト")
+    return approved
+
+
+# ===========================
+# Mythosスタイル: ファイルランキングエージェント
+# ===========================
+
+FILE_RANKING_SYSTEM_PROMPT = """\
+You are a security researcher prioritizing files for vulnerability analysis.
+Rate each file on a scale of 1-5 based on how likely it is to contain security vulnerabilities:
+
+5 = Very likely: handles user input, authentication, file I/O, network, crypto, memory management
+4 = Likely: data processing, serialization, database access, config parsing
+3 = Possible: business logic, API endpoints, middleware
+2 = Unlikely: utility functions, helpers, constants
+1 = Very unlikely: tests, documentation, pure data definitions, generated code
+
+Respond with JSON only: {"rankings": {"filename": score, ...}}
+"""
+
+async def rank_files_by_risk(
+    client,
+    model: str,
+    file_list: List[str],
+) -> dict:
+    """
+    Mythosと同じ戦略: 解析前にファイルを1-5でスコアリングして高リスクから優先解析。
+    最大50ファイルを一括ランキングする（それ以上は複数バッチに分割）。
+    """
+    if not file_list:
+        return {}
+
+    rankings = {}
+    batch_size = 50
+    for i in range(0, len(file_list), batch_size):
+        batch = file_list[i:i + batch_size]
+        files_str = "\n".join(f"- {f}" for f in batch)
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": FILE_RANKING_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Rate these files for security vulnerability likelihood:\n{files_str}"},
+                ],
+                max_tokens=500,
+                temperature=0.0,
+                extra_body={"chat_template_kwargs": {"thinking": False}},
+            )
+            raw = resp.choices[0].message.content.strip()
+            if "```" in raw:
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            data = json.loads(raw)
+            rankings.update(data.get("rankings", {}))
+        except Exception as e:
+            print(f"  [-] ファイルランキングエラー: {e}")
+
+    return rankings
