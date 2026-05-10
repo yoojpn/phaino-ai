@@ -833,11 +833,21 @@ async def start_codeql(req: CodeQLRequest):
             ext_map = {".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "cpp",
                        ".java": "java", ".py": "python", ".js": "javascript",
                        ".ts": "javascript", ".go": "go", ".rb": "ruby"}
-            found = set()
+            lang_counts: Dict[str, int] = {}
             for p in src_root.rglob("*"):
                 if p.suffix in ext_map:
-                    found.add(ext_map[p.suffix])
-            langs = req.languages or list(found)
+                    lang = ext_map[p.suffix]
+                    lang_counts[lang] = lang_counts.get(lang, 0) + 1
+
+            if req.languages:
+                langs = req.languages
+            else:
+                langs = []
+                for lang, count in lang_counts.items():
+                    if lang in CODEQL_HEAVY_LANGS and count < 10:
+                        logger.info(f"  CodeQL {lang}: ファイル数{count}件のためスキップ (codeql/start)")
+                        continue
+                    langs.append(lang)
 
             class _DummyFile:
                 def __init__(self, lang): self.language = lang
