@@ -276,7 +276,8 @@ class ScanWorker:
                     getattr(c, 'propagated_sources', []) and c.taint_sinks
                 )
             ][:20]  # 最大20件（コスト制御）
-            remaining_chunks = [c for c in chunks if c not in set(react_chunks)]
+            react_chunk_ids = {id(c) for c in react_chunks}
+            remaining_chunks = [c for c in chunks if id(c) not in react_chunk_ids]
 
             react_vulns: List[VulnSample] = []
             if react_chunks:
