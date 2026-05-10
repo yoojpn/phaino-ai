@@ -593,16 +593,27 @@ CODEQL_QUERY_SUITES = {
     "ruby":       "codeql/ruby-queries:codeql-suites/ruby-security-extended.qls",
 }
 
+# メモリを多く使う言語（ファイル数が少ない場合はスキップ）
+CODEQL_HEAVY_LANGS = {"javascript", "java"}
+
 
 def detect_languages(files) -> List[str]:
-    """ファイルリストから使用言語を検出"""
-    langs = set()
+    """ファイルリストから使用言語を検出。重い言語はファイル数が少ない場合スキップ"""
+    lang_counts: Dict[str, int] = {}
     for f in files:
         lang = getattr(f, "language", None) or ""
         cq_lang = CODEQL_LANG_MAP.get(lang.lower())
         if cq_lang:
-            langs.add(cq_lang)
-    return list(langs)
+            lang_counts[cq_lang] = lang_counts.get(cq_lang, 0) + 1
+
+    result = []
+    for lang, count in lang_counts.items():
+        # 重い言語は10ファイル以上ある場合のみ実行
+        if lang in CODEQL_HEAVY_LANGS and count < 10:
+            logger.info(f"  CodeQL {lang}: ファイル数{count}件のためスキップ")
+            continue
+        result.append(lang)
+    return result
 
 
 def parse_sarif(sarif_path: Path) -> List[Dict]:
@@ -756,7 +767,7 @@ async def run_codeql(tmpdir: str, files, chunks) -> List[Dict]:
                 "--format=sarif-latest",
                 f"--output={sarif_path}",
                 "--threads=2",
-                "--ram=256",
+                "--ram=4096",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
