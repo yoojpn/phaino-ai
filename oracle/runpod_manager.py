@@ -40,7 +40,7 @@ CPU_POD_NAME        = os.getenv("CPU_POD_NAME", "vulnscan-cpu")
 CPU_POD_PORT        = int(os.getenv("CPU_POD_PORT", "8001"))
 CPU_POD_IMAGE       = os.getenv("CPU_POD_IMAGE", "python:3.11-slim")
 CPU_POD_DISK_SIZE   = int(os.getenv("CPU_POD_DISK_SIZE", "20"))
-CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "600"))
+CPU_POD_HEALTH_TIMEOUT = int(os.getenv("CPU_POD_HEALTH_TIMEOUT", "1800"))
 # 8vCPUs 16GB RAM $0.28/hr に対応するRunPodのCPUタイプ
 CPU_POD_TYPE        = os.getenv("CPU_POD_TYPE", "cpu3c")  # 有効値: cpu3c/cpu3g/cpu3m/cpu5c/cpu5g/cpu5m
 _CPU_POD_INLINE_SCRIPT = (
@@ -59,10 +59,16 @@ _CPU_POD_INLINE_SCRIPT = (
     "if [ ! -f /workspace/codeql/codeql ]; then "
     "  echo '[CPU] CodeQLダウンロード中...' && "
     "  cd /workspace && "
-    "  curl -sL --max-time 120 https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.24.2/codeql-bundle-linux64.tar.zst -o codeql-bundle.tar.zst && "
+    "  for i in 1 2 3; do "
+    "    curl -fL --max-time 600 --retry 3 --retry-delay 5 "
+    "      https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.24.2/codeql-bundle-linux64.tar.zst "
+    "      -o codeql-bundle.tar.zst && break || "
+    "    echo \"[CPU] ダウンロード試行${i}失敗、リトライ...\" && sleep 10; "
+    "  done && "
     "  tar --use-compress-program=unzstd -xf codeql-bundle.tar.zst && "
     "  rm codeql-bundle.tar.zst && "
-    "  echo '[CPU] CodeQL準備完了' || echo '[CPU] CodeQLダウンロード失敗（スキップ）'; "
+    "  /workspace/codeql/codeql --version && "
+    "  echo '[CPU] CodeQL準備完了'; "
     "else "
     "  echo '[CPU] CodeQL既存 skip'; "
     "fi && "
