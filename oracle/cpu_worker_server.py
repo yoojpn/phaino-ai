@@ -836,6 +836,7 @@ async def start_codeql(req: CodeQLRequest):
                 return
 
             src_root = Path(clone_dir)
+            logger.info(f"  [CodeQL] clone完了、src_root={src_root}, ファイル数確認中...")
 
             ext_map = {".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "cpp",
                        ".java": "java", ".py": "python", ".js": "javascript",
@@ -845,6 +846,8 @@ async def start_codeql(req: CodeQLRequest):
                 if p.suffix in ext_map:
                     lang = ext_map[p.suffix]
                     lang_counts[lang] = lang_counts.get(lang, 0) + 1
+
+            logger.info(f"  [CodeQL] 言語別ファイル数: {lang_counts}")
 
             if req.languages:
                 langs = req.languages
