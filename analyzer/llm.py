@@ -885,11 +885,14 @@ Code (excerpt):
             temperature=0.1,
             extra_body={"chat_template_kwargs": {"thinking": False}},
         )
-        raw = resp.choices[0].message.content.strip()
+        import re as _re
+        raw = resp.choices[0].message.content or ""
+        raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
         if "```" in raw:
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
+        raw = raw.strip()
         data = json.loads(raw)
         approved = data.get("approved", True)
         reason = data.get("reason", "")
@@ -984,11 +987,17 @@ async def rank_files_by_risk(
                 temperature=0.0,
                 extra_body={"chat_template_kwargs": {"thinking": False}},
             )
-            raw = resp.choices[0].message.content.strip()
+            raw = resp.choices[0].message.content or ""
+            # thinking タグを除去
+            import re as _re
+            raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
             if "```" in raw:
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
+            raw = raw.strip()
+            if not raw:
+                continue
             data = json.loads(raw)
             rankings.update(data.get("rankings", {}))
         except Exception as e:
