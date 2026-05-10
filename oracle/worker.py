@@ -106,12 +106,14 @@ class ScanWorker:
                 try:
                     # /analyze が返したtmpdir（clone済みパス）を使う
                     codeql_target = analyze_result.get("tmpdir") or target
+                    logger.info(f"  [DEBUG] /codeql/start target: {codeql_target}")
                     async with _httpx.AsyncClient(timeout=30) as client:
                         r = await client.post(
                             f"{cpu_url}/codeql/start",
                             json={"target": codeql_target},
                         )
                         codeql_job_id = r.json().get("job_id")
+                    logger.info(f"  [DEBUG] codeql job_id: {codeql_job_id}")
                     if not codeql_job_id:
                         return []
                     # 最大10分ポーリング
@@ -121,6 +123,7 @@ class ScanWorker:
                             r = await client.get(f"{cpu_url}/codeql/result/{codeql_job_id}")
                             data = r.json()
                             if data.get("status") == "done":
+                                logger.info(f"  [DEBUG] codeql done: {len(data.get('results', []))}件, error={data.get('error')}")
                                 return data.get("results", [])
                 except Exception as e:
                     logger.warning(f"CodeQL polling failed: {e}")
@@ -128,6 +131,8 @@ class ScanWorker:
 
             # まず /analyze を実行してから CodeQL を起動（tmpdirを受け取るため）
             result = await _call_analyze()
+            tmpdir_from_analyze = result.get("tmpdir")
+            logger.info(f"  [DEBUG] /analyze tmpdir: {tmpdir_from_analyze}")
             codeql_results = await _start_and_poll_codeql(result)
 
             # CPUポッドはLLM解析中も維持（ReActループのツール実行に使う）
