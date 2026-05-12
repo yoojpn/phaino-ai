@@ -875,8 +875,14 @@ async def start_codeql(req: CodeQLRequest):
                 db_path = codeql_work / f"db_{lang}"
                 sarif_path = codeql_work / f"results_{lang}.sarif"
                 try:
-                    COMPILED_LANGS = {"cpp", "java", "go", "csharp"}
-                    build_mode_args = ["--build-mode=none"] if lang in COMPILED_LANGS else []
+                    NONE_BUILD_LANGS = {"cpp", "java", "csharp"}
+                    AUTOBUILD_LANGS = {"go"}
+                    if lang in NONE_BUILD_LANGS:
+                        build_mode_args = ["--build-mode=none"]
+                    elif lang in AUTOBUILD_LANGS:
+                        build_mode_args = ["--build-mode=autobuild"]
+                    else:
+                        build_mode_args = []
                     logger.info(f"  CodeQL DB作成中: {lang}")
                     proc = await asyncio.create_subprocess_exec(
                         str(CODEQL_BIN), "database", "create", str(db_path),
