@@ -647,46 +647,50 @@ class VulnAnalyzer:
         progress_callback=None,
         omniscient: Optional["OmniscientContext"] = None,
     ) -> List[VulnSample]:
-        """バッチ並列解析"""
+        """バッチ並列解析 - セマフォでvLLMのmax_num_seqsに合わせた同時実行数制限"""
         results = []
         uncertain = []
         total = len(chunks)
+        # vLLMのmax_num_seqs=32に合わせて同時リクエスト数を制限
+        # 多すぎるとKVキャッシュが溢れてスループットが下がる
+        sem = asyncio.Semaphore(48)
 
-        for i in range(0, total, BATCH_SIZE):
-            batch = chunks[i:i + BATCH_SIZE]
+        async def _analyze_with_sem(chunk, prompt_type, cross_file):
+            async with sem:
+                return await self.analyze_chunk(chunk, prompt_type, cross_file=cross_file)
 
-            tasks = []
-            for chunk in batch:
-                cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
-                if chunk.language == "php":
-                    prompt_type = "php"
-                elif getattr(chunk, 'codeql_confirmed', False) or (
-                    getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks
-                ) or chunk.priority >= 5:
-                    prompt_type = "attacker"
-                else:
-                    prompt_type = "structural"
-                tasks.append(self.analyze_chunk(chunk, prompt_type, cross_file=cross_file))
+        tasks = []
+        for chunk in chunks:
+            cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
+            if chunk.language == "php":
+                prompt_type = "php"
+            elif getattr(chunk, 'codeql_confirmed', False) or (
+                getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks
+            ) or chunk.priority >= 5:
+                prompt_type = "attacker"
+            else:
+                prompt_type = "structural"
+            tasks.append(_analyze_with_sem(chunk, prompt_type, cross_file))
 
-            batch_results = await asyncio.gather(*tasks)
-            for r in batch_results:
-                if r is None:
-                    continue
+        # 全タスクを一気に投げてセマフォで流量制御
+        done_count = 0
+        for coro in asyncio.as_completed(tasks):
+            r = await coro
+            done_count += 1
+            if r is None:
+                pass
+            else:
                 conf = r.context.confidence if r.context else 50
                 if r.label.is_vulnerable:
                     if conf >= 40:
                         results.append(r)
-                    elif conf >= 25:
-                        # confidence低いが脆弱性あり → uncertainリストへ
-                        uncertain.append(r)
                     else:
                         uncertain.append(r)
 
-            done = min(i + BATCH_SIZE, total)
-            if progress_callback:
-                await progress_callback(done, total, len(results))
-            else:
-                print(f"[*] LLM解析: {done}/{total} | 確定候補: {len(results)}件 | 曖昧: {len(uncertain)}件")
+            if progress_callback and done_count % 10 == 0:
+                await progress_callback(done_count, total, len(results))
+            elif done_count % 50 == 0:
+                print(f"[*] LLM解析: {done_count}/{total} | 確定候補: {len(results)}件 | 曖昧: {len(uncertain)}件")
 
         # uncertainをattributeとして保持（workerがreporterに渡す）
         self._uncertain = uncertain
