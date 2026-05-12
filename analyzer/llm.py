@@ -340,7 +340,7 @@ REPORT_TOOL = {
                 },
                 "confidence": {
                     "type": "integer",
-                    "description": "Confidence score 0-100. 0=definitely false positive, 100=certain exploit. Score below 40 means uncertain.",
+                    "description": "Confidence score 0-100. 0=definitely false positive, 100=certain exploit. Score below 25 means uncertain.",
                 },
                 "adversarial_check": {
                     "type": "string",
@@ -361,19 +361,25 @@ REPORT_TOOL = {
 # システムプロンプト
 # ===========================
 SYSTEM_PROMPT = """\
-You are an elite security researcher and penetration tester with omniscient knowledge of the entire codebase.
-Your goal is to find REAL, EXPLOITABLE vulnerabilities for bug bounty reports.
+You are an elite security researcher specializing in bug bounty hunting and finding novel, unknown vulnerabilities.
+Your goal is to find REAL vulnerabilities including novel bugs that have never been seen before.
 
 ## Core Rules
-1. NEVER rely on CVE classifications or known patterns alone
+1. NEVER rely on CVE classifications or known patterns alone — look for NEW vulnerability classes
 2. ALWAYS reason from code structure and data flow
-3. Only report vulnerabilities where an attack ACTUALLY succeeds
+3. Report vulnerabilities where an attack is PLAUSIBLE, not just certain — bug bounty rewards go to finders, not perfectionists
 4. Think as an attacker first, then verify as a defender
 5. You MUST call the report_vulnerability tool with your findings
 6. You MUST fill adversarial_check: argue why this is NOT a vulnerability, then conclude
-7. You MUST assign confidence (0-100): below 40 = false positive territory
+7. You MUST assign confidence (0-100): below 25 = false positive territory
 8. Cross-file context is provided — use it to trace data flows across function boundaries
-9. Look for: business logic bugs, TOCTOU, second-order injections, compound auth bypass
+9. Look for: memory corruption, UAF, type confusion, integer overflow/underflow, OOB read/write,
+   business logic bugs, TOCTOU, second-order injections, compound auth bypass,
+   JIT compiler bugs, garbage collector bugs, parser differentials
+10. For C/C++: pay special attention to pointer arithmetic, buffer bounds, integer conversions,
+    use-after-free, double-free, uninitialized memory
+11. For JS engines (JavaScriptCore, V8): look for type confusion, JIT optimization bugs,
+    speculative execution issues, prototype pollution paths
 """
 
 
@@ -441,8 +447,9 @@ Then conclude: "Despite this, the vulnerability holds because..." OR "Conclusion
 **Step 7: Assign confidence score (0-100)**
 - 90-100: Trivially exploitable, clear data flow, no mitigations
 - 70-89: Likely exploitable, minor uncertainty
-- 40-69: Uncertain (→ uncertain report)
-- 0-39: Likely false positive (→ skip)
+- 40-69: Plausible attack path, some uncertainty (→ uncertain report, still valuable)
+- 25-39: Weak signal but worth flagging (→ uncertain report)
+- 0-24: Likely false positive (→ skip)
 
 Call report_vulnerability with your complete findings.
 """
@@ -456,25 +463,46 @@ def build_attacker_prompt(chunk: FunctionChunk, cross_file: str = "") -> str:
     codeql_section = ""
     if getattr(chunk, 'codeql_confirmed', False):
         codeql_section = f"\n## CodeQL Finding\n{chunk.codeql_flow}\n"
-    return f"""You are an experienced attacker targeting this {chunk.language} code.
+
+    if chunk.language in ("cpp", "c"):
+        cpp_section = """
+## C/C++ Specific Attack Vectors
+1. **Buffer overflow**: array indexing without bounds check, memcpy with attacker-controlled length
+2. **Integer overflow/underflow**: size_t arithmetic, signed/unsigned conversion, multiplication before malloc
+3. **Use-after-free**: object freed then accessed, dangling pointers, iterator invalidation
+4. **Type confusion**: casting between incompatible types, union misuse, vtable corruption
+5. **Format string**: printf/sprintf with user-controlled format argument
+6. **Double-free**: same pointer freed twice, especially in error paths
+7. **Uninitialized memory**: stack variables used before assignment, partial struct init
+8. **OOB read/write**: pointer arithmetic beyond allocation bounds
+9. **Race conditions (TOCTOU)**: check-then-use on shared state without lock
+
+For JS engine code (JavaScriptCore/V8/SpiderMonkey):
+- Type confusion via speculative JIT optimization
+- GC unsafety: JSValue roots not protected during allocation
+- Incorrect cell type assumptions after optimization
+- Prototype chain manipulation leading to wrong property access
+"""
+    else:
+        cpp_section = ""
+
+    return f"""You are an experienced bug bounty hunter targeting this {chunk.language} code.
 
 ## Function: {chunk.function_name} in {chunk.file_path}
 
 ```{chunk.language}
 {chunk.code}
 ```
-{taint_section}{codeql_section}{cross_file_section}
+{taint_section}{codeql_section}{cross_file_section}{cpp_section}
 ## Task
-Find something exploitable in this code. Forget CVE classifications.
-Look at the RAW STRUCTURE.
+Find exploitable bugs. Novel, unknown vulnerabilities are just as valuable as known classes.
+Look at the RAW STRUCTURE and data flow.
 
-Think about:
-1. What can an attacker CONTROL?
-2. Where does attacker-controlled data GO?
-3. Is there any path from controlled input to dangerous output?
-4. What happens at BOUNDARY CONDITIONS?
-5. What if you send NULL, empty string, very long input, special characters?
-6. Are there TIMING issues or STATE issues?
+1. What can an attacker CONTROL (directly or indirectly)?
+2. Where does attacker-controlled data GO? Trace every path.
+3. What happens at BOUNDARY CONDITIONS (0, -1, MAX_INT, empty, null)?
+4. Are there STATE or ORDERING issues?
+5. Are there implicit assumptions that can be violated?
 
 Design a specific attack if you find something.
 Call report_vulnerability with your findings (is_vulnerable=false if nothing exploitable found).
@@ -648,8 +676,10 @@ class VulnAnalyzer:
                 if r.label.is_vulnerable:
                     if conf >= 40:
                         results.append(r)
-                    else:
+                    elif conf >= 25:
                         # confidence低いが脆弱性あり → uncertainリストへ
+                        uncertain.append(r)
+                    else:
                         uncertain.append(r)
 
             done = min(i + BATCH_SIZE, total)

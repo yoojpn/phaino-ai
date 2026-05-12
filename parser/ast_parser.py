@@ -22,6 +22,7 @@ from config import LANGUAGE_PRIORITY, MAX_FUNCTION_TOKENS
 
 # 危険なsink
 HIGH_PRIORITY_SINK_PATTERNS = [
+    # Web/DB
     r"execute\s*\(", r"cursor\.", r"\.query\s*\(", r"mysql_query",
     r"pg_query", r"sqlite3", r"\.raw\s*\(",
     r"os\.system", r"subprocess\.", r"exec\s*\(", r"eval\s*\(",
@@ -35,16 +36,38 @@ HIGH_PRIORITY_SINK_PATTERNS = [
     r"innerHTML", r"document\.write", r"echo\s+\$",
     r"render_template_string", r"Template\s*\(",
     r"password", r"token", r"secret", r"api_key", r"apikey",
+    # C/C++ memory
+    r"memcpy\s*\(", r"memmove\s*\(", r"memset\s*\(", r"strcpy\s*\(",
+    r"strcat\s*\(", r"sprintf\s*\(", r"snprintf\s*\(",
+    r"gets\s*\(", r"scanf\s*\(", r"sscanf\s*\(",
+    r"malloc\s*\(", r"realloc\s*\(", r"free\s*\(",
+    r"new\s+\w", r"delete\s+", r"delete\[\]",
+    r"\bwrite\s*\(", r"\bread\s*\(", r"fwrite\s*\(", r"fread\s*\(",
+    r"system\s*\(", r"popen\s*\(", r"execv\s*\(", r"execve\s*\(",
+    r"printf\s*\(", r"fprintf\s*\(", r"vprintf\s*\(",  # format string
+    r"->setJSValue\b", r"->put\b", r"->get\b",  # JSC specific
+    r"JSValue", r"jsString", r"jsNumber",
 ]
 
 # ユーザー入力のsource
 HIGH_PRIORITY_SOURCE_PATTERNS = [
+    # Web
     r"request\.", r"req\.", r"\$_GET", r"\$_POST", r"\$_REQUEST",
     r"getParameter", r"getHeader", r"getCookie",
     r"argv\[", r"sys\.argv", r"input\s*\(",
     r"body\[", r"params\[", r"query\[",
     r"formData", r"req\.body", r"req\.query", r"req\.params",
     r"flask\.request", r"request\.form", r"request\.args",
+    # C/C++ input
+    r"\bfgets\s*\(", r"\bgetline\s*\(", r"\bread\s*\(", r"\bfread\s*\(",
+    r"\brecv\s*\(", r"\brecvfrom\s*\(", r"\brecvmsg\s*\(",
+    r"getenv\s*\(", r"\bfgetc\s*\(", r"\bgetchar\s*\(",
+    r"\batoi\s*\(", r"\batol\s*\(", r"\bstrtol\s*\(", r"\bstrtoul\s*\(",
+    # JSC/WebKit specific
+    r"->argument\s*\(", r"->uncheckedArgument\s*\(",
+    r"callFrame->", r"exec->", r"globalObject->",
+    r"toWTFString", r"toString\s*\(", r"toNumber\s*\(",
+    r"JSC::JSValue", r"JSC::ExecState",
 ]
 
 # 重要な関数名
