@@ -1021,11 +1021,14 @@ async def rank_files_by_risk(
             # thinking タグを除去
             import re as _re
             raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
-            if "```" in raw:
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            raw = raw.strip()
+            # ```json ... ``` ブロックを抽出
+            m = _re.search(r"```(?:json)?\s*([\s\S]+?)```", raw)
+            if m:
+                raw = m.group(1).strip()
+            # JSONオブジェクト部分だけ抽出
+            m2 = _re.search(r"\{[\s\S]+\}", raw)
+            if m2:
+                raw = m2.group(0)
             if not raw:
                 continue
             data = json.loads(raw)
