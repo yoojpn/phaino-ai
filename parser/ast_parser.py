@@ -63,6 +63,16 @@ HIGH_PRIORITY_SOURCE_PATTERNS = [
     r"\brecv\s*\(", r"\brecvfrom\s*\(", r"\brecvmsg\s*\(",
     r"getenv\s*\(", r"\bfgetc\s*\(", r"\bgetchar\s*\(",
     r"\batoi\s*\(", r"\batol\s*\(", r"\bstrtol\s*\(", r"\bstrtoul\s*\(",
+    # ファイル・ストリーム入力（パーサー系コードに多い）
+    r"\bLoadFile\s*\(", r"\bReadFile\s*\(", r"\bOpenFile\s*\(",
+    r"\bifstream\b", r"\bfopen\s*\(", r"\bstd::cin\b",
+    r"ParseFromFile\s*\(", r"ParseFromString\s*\(", r"ParseFromArray\s*\(",
+    r"->ParseFromFile", r"->ParsePartial",
+    # バッファ・バイト列入力
+    r"\bVerify\s*\(", r"\bGetRoot\s*\(", r"\bGetMutableRoot\s*\(",
+    r"flatbuffers::GetRoot", r"flatbuffers::Verify",
+    r"\buint8_t\s*\*\s*\w+\s*,\s*(?:size_t|int)\s+\w+",  # (buf, len) パターン
+    r"\bconst\s+(?:char|uint8_t)\s*\*\s+buf",
     # JSC/WebKit specific
     r"->argument\s*\(", r"->uncheckedArgument\s*\(",
     r"callFrame->", r"exec->", r"globalObject->",

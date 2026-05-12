@@ -106,10 +106,19 @@ class ScanWorker:
                     # /analyze が返したtmpdir（clone済みパス）を使う
                     codeql_target = analyze_result.get("tmpdir") or target
                     logger.info(f"  [DEBUG] /codeql/start target: {codeql_target}")
+                    # GitHub tree URLからリポジトリルートURLを抽出
+                    # 例: https://github.com/owner/repo/tree/branch/path → https://github.com/owner/repo
+                    import re as _re
+                    raw_target = target if target_type == "github" else ""
+                    if raw_target:
+                        m = _re.match(r'(https://github\.com/[^/]+/[^/]+)(/|$)', raw_target)
+                        repo_root_url = m.group(1) if m else raw_target
+                    else:
+                        repo_root_url = ""
                     async with _httpx.AsyncClient(timeout=30) as client:
                         r = await client.post(
                             f"{cpu_url}/codeql/start",
-                            json={"target": codeql_target, "repo_url": target if target_type == "github" else ""},
+                            json={"target": codeql_target, "repo_url": repo_root_url},
                         )
                         codeql_job_id = r.json().get("job_id")
                     logger.info(f"  [DEBUG] codeql job_id: {codeql_job_id}")
