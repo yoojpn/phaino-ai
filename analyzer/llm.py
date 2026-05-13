@@ -511,80 +511,98 @@ Call report_vulnerability with your findings (is_vulnerable=false if nothing exp
 
 def build_semantic_prompt(chunk: FunctionChunk, callers: List[str] = None, callees: List[str] = None, cross_file: str = "") -> str:
     """
-    意味論的矛盾プロンプト:
-    - コメント・関数名と実装のギャップ
-    - 呼び出し元が前提とする不変条件を実装が破るケース
-    - エラーパスの抜け、状態機械の穴
-    上級バグハンター向けの観点で未知の脆弱性を検出する
+    意味論的矛盾プロンプト - 上級バグハンター向け
+    パターンマッチではなく「コードが何を約束しているか vs 実際に何をしているか」のギャップを探す
     """
     caller_section = ""
     if callers:
-        caller_section = f"\n## 呼び出し元関数（これらがこの関数の動作を前提としている）\n" + "\n".join(f"- {c}" for c in callers[:8])
+        caller_section = "\n## Caller functions (these TRUST this function's behavior)\n" + "\n".join(f"- {c}" for c in callers[:8])
     callee_section = ""
     if callees:
-        callee_section = f"\n## 呼び出し先関数\n" + "\n".join(f"- {c}" for c in callees[:8])
+        callee_section = "\n## Callee functions (called by this function)\n" + "\n".join(f"- {c}" for c in callees[:8])
     cross_section = f"\n## Cross-file Context\n{cross_file}\n" if cross_file else ""
 
-    return f"""You are a world-class vulnerability researcher. Your task is NOT to find known patterns — it is to find logic bugs and semantic contradictions that automated tools miss.
+    taint_section = ""
+    if getattr(chunk, 'taint_sources', []) or getattr(chunk, 'taint_sinks', []):
+        taint_section = f"\n## Taint Info\nSources: {chunk.taint_sources}\nSinks: {chunk.taint_sinks}\n"
+
+    if chunk.language in ("cpp", "c"):
+        lang_phase = """
+### Phase 7: C/C++ Memory Safety (semantic level)
+Beyond simple buffer overflows — look for SEMANTIC memory bugs:
+- **Ownership confusion**: Who is responsible for freeing this memory? Can double-free happen?
+- **Lifetime violation**: Is there a path where a reference outlives the object?
+- **Size semantic mismatch**: Does `size` mean bytes here but elements elsewhere in callers?
+- **Signed/unsigned contract violation**: Does the caller pass a signed value the callee treats as unsigned?
+- **NULL dereference after "guaranteed" non-null**: Code that assumes a prior check guarantees non-null, but there's a path that skips the check
+- **Iterator/pointer invalidation**: Container modified while iterating
+- **Exception safety**: In C++ with exceptions, does partial construction leave memory in inconsistent state?
+"""
+    else:
+        lang_phase = ""
+
+    return f"""You are a world-class vulnerability researcher. Your goal is to find bugs that automated tools and junior researchers MISS — logic bugs, semantic contradictions, implicit assumption violations.
 
 ## Function: `{chunk.function_name}` in `{chunk.file_path}` (lines {chunk.start_line}-{chunk.end_line})
 
 ```{chunk.language}
 {chunk.code}
 ```
-{caller_section}{callee_section}{cross_section}
+{taint_section}{caller_section}{callee_section}{cross_section}
 
 ## Semantic Contradiction Analysis
 
-### Phase 1: Contract Analysis
-- What does the function NAME promise? (e.g. "validate", "sanitize", "get", "set")
-- What do the COMMENTS claim the function does?
-- What do CALLERS assume this function guarantees?
-- Does the IMPLEMENTATION actually fulfill these contracts?
+### Phase 1: Contract vs Implementation
+- What does the function NAME promise? ("validate", "sanitize", "get", "safe_")
+- What do COMMENTS claim this does?
+- What do CALLERS assume is guaranteed after calling this?
+- Does the IMPLEMENTATION actually fulfill ALL of these?
 
-Look for: A function named "validate_X" that doesn't actually validate X. A function that claims to return a safe value but can return null/invalid. A function that modifies state it shouldn't.
+Look for: "validate_X" that doesn't fully validate. Claims to return safe value but can return null/invalid on edge case. Modifies shared state a caller doesn't expect.
 
 ### Phase 2: Invariant Violation
-What invariants must hold after this function executes?
-- Object state consistency (fields that must be in sync)
-- Memory ownership (who owns allocated memory after return)
-- Error state (partial completion leaving inconsistent state)
+What invariants must hold AFTER this function?
+- Object field consistency (fields that must stay in sync)
+- Memory ownership (clear who owns what after return)
+- Error state (partial failure leaves consistent state)
 
-Can an attacker force a path where invariants are violated?
+Can an attacker force a code path where an invariant is broken?
 
 ### Phase 3: Caller Trust Violation
-The callers listed above TRUST this function to:
-- Not modify unexpected state
-- Return valid values in all code paths
-- Handle edge cases the caller doesn't re-check
-
-Find cases where this trust is misplaced.
+Callers listed above TRUST this function. Find where that trust is misplaced:
+- Does this function skip a check the caller assumes it always performs?
+- Can it return a value the caller treats as validated/safe but isn't?
+- Does it have a hidden side effect the caller doesn't account for?
 
 ### Phase 4: Error Path Analysis
 Trace EVERY error/exceptional path:
-- Early returns, exceptions, null checks that fail
-- What state is left behind when the function fails mid-way?
+- What state is left when the function fails MID-WAY?
 - Can an attacker FORCE an error that leaves exploitable state?
+- Early returns, exception paths, null-check failures — what do they leave behind?
 
 ### Phase 5: Implicit Assumptions
-What does this code ASSUME that is never explicitly checked?
-- Integer never overflows
-- Pointer is never null after this point
-- Vector/map entry always exists
-- Lock is always held
-- File always exists
+What does this code ASSUME without checking?
+- Integer never overflows at this scale
+- Pointer/reference always valid here
+- Collection entry always exists
+- Lock always held
+- Input always within expected range
 
-Can any assumption be violated by attacker-controlled input, timing, or resource exhaustion?
+Which assumptions can an attacker violate?
 
 ### Phase 6: Novel Attack Design
-If you found a semantic contradiction or violated invariant:
-Design a SPECIFIC attack sequence:
-1. What attacker-controlled input triggers it?
-2. What sequence of operations?
-3. What is the exploitable outcome?
-
-Assign confidence (0-100). Call report_vulnerability with findings.
+If you found a semantic contradiction:
+1. Exactly what attacker input/action triggers it?
+2. What is the operation SEQUENCE?
+3. What is the exploitable outcome (crash, UAF, info leak, auth bypass)?
+4. Why would a human reviewer miss this?
+{lang_phase}
+Assign confidence (0-100). Report even at confidence 30 if the logic contradiction is real.
+Call report_vulnerability with findings.
 """
+
+
+def build_php_prompt(chunk: FunctionChunk) -> str:
     return f"""Analyze this PHP code for security vulnerabilities.
 
 ## Function: {chunk.function_name} in {chunk.file_path}
@@ -769,16 +787,14 @@ class VulnAnalyzer:
             if chunk.language == "php":
                 prompt_type = "php"
             elif getattr(chunk, 'codeql_confirmed', False):
-                # CodeQL確認済み → attacker（最重要）
                 prompt_type = "attacker"
             elif getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks:
-                # taintチェーン → attacker
                 prompt_type = "attacker"
-            elif chunk.priority >= 7:
-                # 超高priority → semantic（意味論的矛盾）
+            elif chunk.priority >= 6:
+                # 高priority → semantic（意味論的矛盾、未知バグ発見に有効）
                 prompt_type = "semantic"
-            elif chunk.priority >= 4:
-                # 高priority → attacker
+            elif chunk.priority >= 3:
+                # 中priority → attacker
                 prompt_type = "attacker"
             else:
                 # 低priority → structural
