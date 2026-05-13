@@ -22,12 +22,6 @@ VALID_GPU_IDS = {
     'NVIDIA A100 80GB PCIe',
     'A100 SXM',
     'NVIDIA A100-SXM4-80GB',
-    'L40',
-    'NVIDIA L40',
-    'L40S',
-    'NVIDIA L40S',
-    'RTX 6000 Ada',
-    'NVIDIA RTX 6000 Ada Generation',
 }
 
 RUNPOD_API_KEY      = os.getenv("RUNPOD_API_KEY", "")
@@ -534,31 +528,18 @@ class RunPodManager:
                     })
 
             # High優先、同じstockなら安い順
-            logger.info(f"GPU在庫確認: {[(g['id'], g['name'], g['price'], g['stock']) for g in available[:5]]}")
-            # GPU優先順（安い順・性能順）
+            logger.info(f"GPU在庫確認: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
+            # 4090に性能・金額が近いGPUを優先するスコアリング
             GPU_PRIORITY = {
                 "A40":                       1,
                 "NVIDIA A40":                1,
-                "RTX A6000":                 2,
-                "NVIDIA RTX A6000":          2,
-                "A100 PCIe":                 3,
-                "NVIDIA A100 80GB PCIe":     3,
-                "A100 SXM":                  4,
-                "NVIDIA A100-SXM4-80GB":     4,
-                "L40":                       5,
-                "NVIDIA L40":                5,
-                "RTX 6000 Ada":              6,
-                "NVIDIA RTX 6000 Ada Generation": 6,
-                "L40S":                      7,
-                "NVIDIA L40S":               7,
+                "A100 PCIe":                 2,
+                "NVIDIA A100 80GB PCIe":     2,
+                "A100 SXM":                  3,
+                "NVIDIA A100-SXM4-80GB":     3,
             }
             filtered = available
-            # id と name の両方でPRIORITYを引いて小さい方を使う
-            filtered.sort(key=lambda x: (
-                min(GPU_PRIORITY.get(x["id"], 99), GPU_PRIORITY.get(x["name"], 99)),
-                0 if x["stock"] == "High" else 1,
-                x["price"]
-            ))
+            filtered.sort(key=lambda x: (GPU_PRIORITY.get(x["name"], 99), 0 if x["stock"] == "High" else 1, x["price"]))
             logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
             return [g["id"] for g in filtered]
         except Exception as e:
@@ -568,10 +549,7 @@ class RunPodManager:
     async def _create_pod(self) -> str:
         """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
         gpu_candidates = await self._get_available_gpus()
-        # VALID_GPU_IDSフィルタを外す（APIのid文字列が一致しない場合があるため）
-        # _get_available_gpusが返すのは既にvram>=45, price<1.60でフィルタ済みのid
-        selected_gpus = gpu_candidates[:8]
-        logger.info(f"Pod作成GPU候補: {selected_gpus}")
+        selected_gpus = [g for g in gpu_candidates if g in VALID_GPU_IDS][:8]
         gpu_count = 1
 
         base_payload = {
