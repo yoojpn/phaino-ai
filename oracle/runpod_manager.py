@@ -555,7 +555,10 @@ class RunPodManager:
     async def _create_pod(self) -> str:
         """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
         gpu_candidates = await self._get_available_gpus()
-        selected_gpus = [g for g in gpu_candidates if g in VALID_GPU_IDS][:8]
+        # VALID_GPU_IDSフィルタを外す（APIのid文字列が一致しない場合があるため）
+        # _get_available_gpusが返すのは既にvram>=45, price<1.60でフィルタ済みのid
+        selected_gpus = gpu_candidates[:8]
+        logger.info(f"Pod作成GPU候補: {selected_gpus}")
         gpu_count = 1
 
         base_payload = {
