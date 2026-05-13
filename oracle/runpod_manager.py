@@ -246,37 +246,43 @@ class CpuPodManager:
 
     async def _create_pod(self) -> str:
         """CPUポッドを新規作成（RunPod CPU Pod API）"""
-        payload = {
-            "name": CPU_POD_NAME,
-            "imageName": CPU_POD_IMAGE,
-            "cloudType": "COMMUNITY",
-            "computeType": "CPU",
-            "cpuFlavorIds": [CPU_POD_TYPE],
-            "vcpuCount": 4,
-            "containerDiskInGb": CPU_POD_DISK_SIZE,
-            "ports": [f"{CPU_POD_PORT}/http"],
-            "dockerStartCmd": CPU_POD_START_CMD,
-            "env": {
-                "VULNSCAN_ROOT": "/workspace/vulnscan",
-                "CPU_POD_PORT": str(CPU_POD_PORT),
-                "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN", ""),
-            },
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "https://rest.runpod.io/v1/pods",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
+        # 在庫切れ時のフォールバック順
+        cpu_flavors = [CPU_POD_TYPE] + [f for f in ["cpu3c", "cpu3g", "cpu3m", "cpu5c", "cpu5g", "cpu5m"] if f != CPU_POD_TYPE]
+        last_error = None
+        for flavor in cpu_flavors:
+            payload = {
+                "name": CPU_POD_NAME,
+                "imageName": CPU_POD_IMAGE,
+                "cloudType": "COMMUNITY",
+                "computeType": "CPU",
+                "cpuFlavorIds": [flavor],
+                "vcpuCount": 4,
+                "containerDiskInGb": CPU_POD_DISK_SIZE,
+                "ports": [f"{CPU_POD_PORT}/http"],
+                "dockerStartCmd": CPU_POD_START_CMD,
+                "env": {
+                    "VULNSCAN_ROOT": "/workspace/vulnscan",
+                    "CPU_POD_PORT": str(CPU_POD_PORT),
+                    "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN", ""),
                 },
-                timeout=30,
-            )
-            data = resp.json()
-            if resp.status_code in (200, 201) and isinstance(data, dict) and data.get("id"):
-                logger.info(f"[CPU] ポッド作成成功: {data['id']}")
-                return data["id"]
-            raise RuntimeError(f"CPUポッド作成失敗: {data}")
+            }
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://rest.runpod.io/v1/pods",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=30,
+                )
+                data = resp.json()
+                if resp.status_code in (200, 201) and isinstance(data, dict) and data.get("id"):
+                    logger.info(f"[CPU] ポッド作成成功: {data['id']} (flavor={flavor})")
+                    return data["id"]
+                last_error = data
+                logger.warning(f"[CPU] {flavor} 失敗: {data}")
+        raise RuntimeError(f"CPUポッド作成失敗: {last_error}")
 
     async def _delete_pod(self, pod_id: str):
         mutation = """
