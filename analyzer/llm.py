@@ -509,7 +509,82 @@ Call report_vulnerability with your findings (is_vulnerable=false if nothing exp
 """
 
 
-def build_php_prompt(chunk: FunctionChunk) -> str:
+def build_semantic_prompt(chunk: FunctionChunk, callers: List[str] = None, callees: List[str] = None, cross_file: str = "") -> str:
+    """
+    意味論的矛盾プロンプト:
+    - コメント・関数名と実装のギャップ
+    - 呼び出し元が前提とする不変条件を実装が破るケース
+    - エラーパスの抜け、状態機械の穴
+    上級バグハンター向けの観点で未知の脆弱性を検出する
+    """
+    caller_section = ""
+    if callers:
+        caller_section = f"\n## 呼び出し元関数（これらがこの関数の動作を前提としている）\n" + "\n".join(f"- {c}" for c in callers[:8])
+    callee_section = ""
+    if callees:
+        callee_section = f"\n## 呼び出し先関数\n" + "\n".join(f"- {c}" for c in callees[:8])
+    cross_section = f"\n## Cross-file Context\n{cross_file}\n" if cross_file else ""
+
+    return f"""You are a world-class vulnerability researcher. Your task is NOT to find known patterns — it is to find logic bugs and semantic contradictions that automated tools miss.
+
+## Function: `{chunk.function_name}` in `{chunk.file_path}` (lines {chunk.start_line}-{chunk.end_line})
+
+```{chunk.language}
+{chunk.code}
+```
+{caller_section}{callee_section}{cross_section}
+
+## Semantic Contradiction Analysis
+
+### Phase 1: Contract Analysis
+- What does the function NAME promise? (e.g. "validate", "sanitize", "get", "set")
+- What do the COMMENTS claim the function does?
+- What do CALLERS assume this function guarantees?
+- Does the IMPLEMENTATION actually fulfill these contracts?
+
+Look for: A function named "validate_X" that doesn't actually validate X. A function that claims to return a safe value but can return null/invalid. A function that modifies state it shouldn't.
+
+### Phase 2: Invariant Violation
+What invariants must hold after this function executes?
+- Object state consistency (fields that must be in sync)
+- Memory ownership (who owns allocated memory after return)
+- Error state (partial completion leaving inconsistent state)
+
+Can an attacker force a path where invariants are violated?
+
+### Phase 3: Caller Trust Violation
+The callers listed above TRUST this function to:
+- Not modify unexpected state
+- Return valid values in all code paths
+- Handle edge cases the caller doesn't re-check
+
+Find cases where this trust is misplaced.
+
+### Phase 4: Error Path Analysis
+Trace EVERY error/exceptional path:
+- Early returns, exceptions, null checks that fail
+- What state is left behind when the function fails mid-way?
+- Can an attacker FORCE an error that leaves exploitable state?
+
+### Phase 5: Implicit Assumptions
+What does this code ASSUME that is never explicitly checked?
+- Integer never overflows
+- Pointer is never null after this point
+- Vector/map entry always exists
+- Lock is always held
+- File always exists
+
+Can any assumption be violated by attacker-controlled input, timing, or resource exhaustion?
+
+### Phase 6: Novel Attack Design
+If you found a semantic contradiction or violated invariant:
+Design a SPECIFIC attack sequence:
+1. What attacker-controlled input triggers it?
+2. What sequence of operations?
+3. What is the exploitable outcome?
+
+Assign confidence (0-100). Call report_vulnerability with findings.
+"""
     return f"""Analyze this PHP code for security vulnerabilities.
 
 ## Function: {chunk.function_name} in {chunk.file_path}
@@ -580,12 +655,34 @@ Verify the complete data flow:
         analysis_focus = """
 ## Compound Vulnerability Analysis
 
-Find vulnerabilities that ONLY exist because of how these functions INTERACT:
+Find vulnerabilities that ONLY exist because of how these functions INTERACT.
+Single-function analysis will miss these. Think in SEQUENCES and STATES.
 
-1. **Chain Attacks** (A -> B -> C -> Goal): Does A's output become B's input?
-2. **Auth Bypass Chains**: Unprotected path to reach protected resource?
-3. **Second-Order**: Does A store data that B later executes?
-4. **Race Conditions**: State corruption across function calls?
+### Attack Sequence Analysis (A → B → C)
+1. Can you call these functions in an unexpected ORDER?
+2. Does Function A set up state that Function B misuses?
+3. Does Function A's output become Function B's unsanitized input?
+4. Can you interleave calls to corrupt shared state?
+
+### State Machine Exploitation
+- What STATES can each object/resource be in?
+- Are there ILLEGAL state transitions an attacker can force?
+- Is there a state where invariants break (e.g., initialized=true but buffer=null)?
+- Can you force a PARTIAL state (e.g., half-initialized, half-freed)?
+
+### Second-Order Attacks
+- Does Function A STORE data that Function B later EXECUTES or TRUSTS?
+- Is there a time gap between store and use where state can be corrupted?
+
+### Resource/Error Interaction
+- What happens if Function A fails halfway and Function B runs on partial state?
+- Can resource exhaustion (OOM, disk full) trigger an exploitable path?
+
+### Caller Trust Violations
+- Does Caller C assume Functions A+B together guarantee some property?
+- Can an attacker violate that guarantee without Caller C noticing?
+
+Design a specific multi-step attack sequence if found.
 """
 
     return f"""Analyze these MULTIPLE functions — {group_desc}.
@@ -615,12 +712,16 @@ class VulnAnalyzer:
         chunk: FunctionChunk,
         prompt_type: str = "structural",
         cross_file: str = "",
+        callers: List[str] = None,
+        callees: List[str] = None,
     ) -> Optional[VulnSample]:
         """単一関数の解析"""
         if prompt_type == "structural":
             user_prompt = build_structural_prompt(chunk, cross_file)
         elif prompt_type == "attacker":
             user_prompt = build_attacker_prompt(chunk, cross_file)
+        elif prompt_type == "semantic":
+            user_prompt = build_semantic_prompt(chunk, callers=callers, callees=callees, cross_file=cross_file)
         elif prompt_type == "php":
             user_prompt = build_php_prompt(chunk)
         else:
@@ -655,22 +756,34 @@ class VulnAnalyzer:
         # 多すぎるとKVキャッシュが溢れてスループットが下がる
         sem = asyncio.Semaphore(48)
 
-        async def _analyze_with_sem(chunk, prompt_type, cross_file):
+        async def _analyze_with_sem(chunk, prompt_type, cross_file, callers, callees):
             async with sem:
-                return await self.analyze_chunk(chunk, prompt_type, cross_file=cross_file)
+                return await self.analyze_chunk(chunk, prompt_type, cross_file=cross_file, callers=callers, callees=callees)
 
         tasks = []
         for chunk in chunks:
             cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
+            callers = list(omniscient.reverse_graph.get(chunk.function_name, []))[:8] if omniscient else []
+            callees = list(omniscient.call_graph.get(chunk.function_name, []))[:8] if omniscient else []
+
             if chunk.language == "php":
                 prompt_type = "php"
-            elif getattr(chunk, 'codeql_confirmed', False) or (
-                getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks
-            ) or chunk.priority >= 5:
+            elif getattr(chunk, 'codeql_confirmed', False):
+                # CodeQL確認済み → attacker（最重要）
+                prompt_type = "attacker"
+            elif getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks:
+                # taintチェーン → attacker
+                prompt_type = "attacker"
+            elif chunk.priority >= 7:
+                # 超高priority → semantic（意味論的矛盾）
+                prompt_type = "semantic"
+            elif chunk.priority >= 4:
+                # 高priority → attacker
                 prompt_type = "attacker"
             else:
+                # 低priority → structural
                 prompt_type = "structural"
-            tasks.append(_analyze_with_sem(chunk, prompt_type, cross_file))
+            tasks.append(_analyze_with_sem(chunk, prompt_type, cross_file, callers, callees))
 
         # 全タスクを一気に投げてセマフォで流量制御
         done_count = 0
