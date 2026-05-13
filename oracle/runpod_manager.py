@@ -534,18 +534,31 @@ class RunPodManager:
                     })
 
             # High優先、同じstockなら安い順
-            logger.info(f"GPU在庫確認: {[(g['name'], g['price'], g['stock']) for g in available[:5]]}")
-            # 4090に性能・金額が近いGPUを優先するスコアリング
+            logger.info(f"GPU在庫確認: {[(g['id'], g['name'], g['price'], g['stock']) for g in available[:5]]}")
+            # GPU優先順（安い順・性能順）
             GPU_PRIORITY = {
                 "A40":                       1,
                 "NVIDIA A40":                1,
-                "A100 PCIe":                 2,
-                "NVIDIA A100 80GB PCIe":     2,
-                "A100 SXM":                  3,
-                "NVIDIA A100-SXM4-80GB":     3,
+                "RTX A6000":                 2,
+                "NVIDIA RTX A6000":          2,
+                "A100 PCIe":                 3,
+                "NVIDIA A100 80GB PCIe":     3,
+                "A100 SXM":                  4,
+                "NVIDIA A100-SXM4-80GB":     4,
+                "L40":                       5,
+                "NVIDIA L40":                5,
+                "RTX 6000 Ada":              6,
+                "NVIDIA RTX 6000 Ada Generation": 6,
+                "L40S":                      7,
+                "NVIDIA L40S":               7,
             }
             filtered = available
-            filtered.sort(key=lambda x: (GPU_PRIORITY.get(x["name"], 99), 0 if x["stock"] == "High" else 1, x["price"]))
+            # id と name の両方でPRIORITYを引いて小さい方を使う
+            filtered.sort(key=lambda x: (
+                min(GPU_PRIORITY.get(x["id"], 99), GPU_PRIORITY.get(x["name"], 99)),
+                0 if x["stock"] == "High" else 1,
+                x["price"]
+            ))
             logger.info(f"GPU優先順: {[(g['name'], g['price'], g['stock']) for g in filtered[:5]]}")
             return [g["id"] for g in filtered]
         except Exception as e:
