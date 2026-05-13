@@ -397,7 +397,7 @@ class ScanWorker:
             llm_client = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
             if all_vulns:
-                self._log(job_id, "\n[Step 5] CPUポッドでASan/libFuzzer検証...\n")
+                self._log(job_id, "\n[Step 5] CPUポッドでASan/PoC検証...\n")
                 cpp_vulns = [s for s in all_vulns if s.language.value in ("c", "cpp")]
                 other_vulns = [s for s in all_vulns if s.language.value not in ("c", "cpp")]
 
@@ -405,31 +405,32 @@ class ScanWorker:
                 if cpp_vulns and cpu_url:
                     for s in cpp_vulns:
                         try:
-                            # C/C++はCPUポッドの/execでASanコンパイル実行
-                            async with _httpx.AsyncClient(timeout=60) as client:
-                                r = await client.post(f"{cpu_url}/exec", json={
-                                    "code": s.code,
-                                    "language": "c" if s.language.value == "c" else "cpp",
-                                    "stdin": "",
+                            poc_code = getattr(s.attack_scenario, 'poc_script', None) or s.code
+                            async with _httpx.AsyncClient(timeout=90) as client:
+                                r = await client.post(f"{cpu_url}/exec_poc", json={
+                                    "vuln_description": s.label.title if s.label else "",
+                                    "vulnerable_code": poc_code,
+                                    "language": s.language.value,
+                                    "repo_path": "",
+                                    "timeout": 30,
                                 })
                             d = r.json()
-                            asan_out = d.get("stderr", "") + d.get("stdout", "")
-                            crash_indicators = [
-                                "heap-buffer-overflow", "stack-buffer-overflow",
-                                "use-after-free", "segmentation fault",
-                                "==error:", "AddressSanitizer", "signal 11",
-                            ]
-                            if any(k.lower() in asan_out.lower() for k in crash_indicators):
+                            if d.get("crashed"):
                                 s.attack_model.exploitability = Exploitability.CONFIRMED
-                                s.attack_scenario.poc_script = f"# ASan crash confirmed\n{asan_out[:800]}"
-                                self._log(job_id, f"  [✓] ASan確認: {s.context.function if s.context else '?'}\n")
+                                s.attack_scenario.poc_script = (
+                                    f"# ASan crash confirmed: {d.get('crash_type', 'unknown')}\n"
+                                    f"{d.get('asan_output', '')[:800]}"
+                                )
+                                self._log(job_id, f"  [✓] クラッシュ確認 ({d.get('crash_type')}): {s.context.function if s.context else '?'}\n")
+                            elif d.get("error"):
+                                self._log(job_id, f"  [-] PoC実行エラー: {d['error'][:100]}\n")
                         except Exception as e:
-                            logger.warning(f"ASan exec error: {e}")
+                            logger.warning(f"PoC exec error: {e}")
                         confirmed_cpp.append(s)
                     all_vulns = confirmed_cpp + other_vulns
 
                 confirmed = sum(1 for s in all_vulns if s.attack_model.exploitability == Exploitability.CONFIRMED)
-                self._log(job_id, f"  ASan/libFuzzer完了: {confirmed}件confirmed\n")
+                self._log(job_id, f"  ASan/PoC完了: {confirmed}件confirmed\n")
 
             # ===========================
             # Step 6: ReActループ (CPUポッドの /exec /fuzz を使用)
@@ -575,15 +576,56 @@ class ScanWorker:
 # ===========================
 # 複合グループ構築（main.pyと同じロジック）
 # ===========================
-def _build_compound_groups(chunks, group_size: int = 3, max_groups: int = 20):
+def _build_compound_groups(chunks, group_size: int = 3, max_groups: int = 30):
+    """
+    複合解析グループを構築。
+    1. 同一ファイルの高priority関数グループ（従来通り）
+    2. 呼び出しチェーン深度2: A→B→C のグループ（新規）
+    """
     groups = []
+    seen = set()
+
+    # 関数名→chunkのマップ
+    func_map = {c.function_name: c for c in chunks}
+
+    # 1. 呼び出しチェーン深度2グループ（A→B→C）
+    for chunk in chunks:
+        if chunk.priority > 5:
+            continue  # 低priorityはスキップ
+        callees = getattr(chunk, 'calls', [])
+        chain = [chunk]
+        for callee_name in callees[:3]:
+            callee = func_map.get(callee_name)
+            if callee and id(callee) != id(chunk):
+                chain.append(callee)
+                # 深度2
+                for callee2_name in getattr(callee, 'calls', [])[:2]:
+                    callee2 = func_map.get(callee2_name)
+                    if callee2 and id(callee2) not in {id(c) for c in chain}:
+                        chain.append(callee2)
+                        break
+            if len(chain) >= group_size:
+                break
+        if len(chain) >= 2:
+            key = frozenset(id(c) for c in chain)
+            if key not in seen:
+                seen.add(key)
+                groups.append(chain[:group_size])
+        if len(groups) >= max_groups // 2:
+            break
+
+    # 2. 同一ファイルの高priority関数グループ（従来）
     file_chunks: Dict[str, list] = {}
     for chunk in chunks:
-        if chunk.priority <= 3:
+        if chunk.priority <= 4:
             file_chunks.setdefault(chunk.file_path, []).append(chunk)
     for _, lst in file_chunks.items():
         if len(lst) >= 2:
-            groups.append(lst[:group_size])
+            key = frozenset(id(c) for c in lst[:group_size])
+            if key not in seen:
+                seen.add(key)
+                groups.append(lst[:group_size])
         if len(groups) >= max_groups:
             break
+
     return groups

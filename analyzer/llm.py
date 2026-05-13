@@ -509,6 +509,99 @@ Call report_vulnerability with your findings (is_vulnerable=false if nothing exp
 """
 
 
+def build_semantic_prompt(chunk: FunctionChunk, callers: List[str] = None, callees: List[str] = None, cross_file: str = "") -> str:
+    """
+    意味論的矛盾プロンプト - 上級バグハンター向け
+    パターンマッチではなく「コードが何を約束しているか vs 実際に何をしているか」のギャップを探す
+    """
+    caller_section = ""
+    if callers:
+        caller_section = "\n## Caller functions (these TRUST this function's behavior)\n" + "\n".join(f"- {c}" for c in callers[:8])
+    callee_section = ""
+    if callees:
+        callee_section = "\n## Callee functions (called by this function)\n" + "\n".join(f"- {c}" for c in callees[:8])
+    cross_section = f"\n## Cross-file Context\n{cross_file}\n" if cross_file else ""
+
+    taint_section = ""
+    if getattr(chunk, 'taint_sources', []) or getattr(chunk, 'taint_sinks', []):
+        taint_section = f"\n## Taint Info\nSources: {chunk.taint_sources}\nSinks: {chunk.taint_sinks}\n"
+
+    if chunk.language in ("cpp", "c"):
+        lang_phase = """
+### Phase 7: C/C++ Memory Safety (semantic level)
+Beyond simple buffer overflows — look for SEMANTIC memory bugs:
+- **Ownership confusion**: Who is responsible for freeing this memory? Can double-free happen?
+- **Lifetime violation**: Is there a path where a reference outlives the object?
+- **Size semantic mismatch**: Does `size` mean bytes here but elements elsewhere in callers?
+- **Signed/unsigned contract violation**: Does the caller pass a signed value the callee treats as unsigned?
+- **NULL dereference after "guaranteed" non-null**: Code that assumes a prior check guarantees non-null, but there's a path that skips the check
+- **Iterator/pointer invalidation**: Container modified while iterating
+- **Exception safety**: In C++ with exceptions, does partial construction leave memory in inconsistent state?
+"""
+    else:
+        lang_phase = ""
+
+    return f"""You are a world-class vulnerability researcher. Your goal is to find bugs that automated tools and junior researchers MISS — logic bugs, semantic contradictions, implicit assumption violations.
+
+## Function: `{chunk.function_name}` in `{chunk.file_path}` (lines {chunk.start_line}-{chunk.end_line})
+
+```{chunk.language}
+{chunk.code}
+```
+{taint_section}{caller_section}{callee_section}{cross_section}
+
+## Semantic Contradiction Analysis
+
+### Phase 1: Contract vs Implementation
+- What does the function NAME promise? ("validate", "sanitize", "get", "safe_")
+- What do COMMENTS claim this does?
+- What do CALLERS assume is guaranteed after calling this?
+- Does the IMPLEMENTATION actually fulfill ALL of these?
+
+Look for: "validate_X" that doesn't fully validate. Claims to return safe value but can return null/invalid on edge case. Modifies shared state a caller doesn't expect.
+
+### Phase 2: Invariant Violation
+What invariants must hold AFTER this function?
+- Object field consistency (fields that must stay in sync)
+- Memory ownership (clear who owns what after return)
+- Error state (partial failure leaves consistent state)
+
+Can an attacker force a code path where an invariant is broken?
+
+### Phase 3: Caller Trust Violation
+Callers listed above TRUST this function. Find where that trust is misplaced:
+- Does this function skip a check the caller assumes it always performs?
+- Can it return a value the caller treats as validated/safe but isn't?
+- Does it have a hidden side effect the caller doesn't account for?
+
+### Phase 4: Error Path Analysis
+Trace EVERY error/exceptional path:
+- What state is left when the function fails MID-WAY?
+- Can an attacker FORCE an error that leaves exploitable state?
+- Early returns, exception paths, null-check failures — what do they leave behind?
+
+### Phase 5: Implicit Assumptions
+What does this code ASSUME without checking?
+- Integer never overflows at this scale
+- Pointer/reference always valid here
+- Collection entry always exists
+- Lock always held
+- Input always within expected range
+
+Which assumptions can an attacker violate?
+
+### Phase 6: Novel Attack Design
+If you found a semantic contradiction:
+1. Exactly what attacker input/action triggers it?
+2. What is the operation SEQUENCE?
+3. What is the exploitable outcome (crash, UAF, info leak, auth bypass)?
+4. Why would a human reviewer miss this?
+{lang_phase}
+Assign confidence (0-100). Report even at confidence 30 if the logic contradiction is real.
+Call report_vulnerability with findings.
+"""
+
+
 def build_php_prompt(chunk: FunctionChunk) -> str:
     return f"""Analyze this PHP code for security vulnerabilities.
 
@@ -580,12 +673,34 @@ Verify the complete data flow:
         analysis_focus = """
 ## Compound Vulnerability Analysis
 
-Find vulnerabilities that ONLY exist because of how these functions INTERACT:
+Find vulnerabilities that ONLY exist because of how these functions INTERACT.
+Single-function analysis will miss these. Think in SEQUENCES and STATES.
 
-1. **Chain Attacks** (A -> B -> C -> Goal): Does A's output become B's input?
-2. **Auth Bypass Chains**: Unprotected path to reach protected resource?
-3. **Second-Order**: Does A store data that B later executes?
-4. **Race Conditions**: State corruption across function calls?
+### Attack Sequence Analysis (A → B → C)
+1. Can you call these functions in an unexpected ORDER?
+2. Does Function A set up state that Function B misuses?
+3. Does Function A's output become Function B's unsanitized input?
+4. Can you interleave calls to corrupt shared state?
+
+### State Machine Exploitation
+- What STATES can each object/resource be in?
+- Are there ILLEGAL state transitions an attacker can force?
+- Is there a state where invariants break (e.g., initialized=true but buffer=null)?
+- Can you force a PARTIAL state (e.g., half-initialized, half-freed)?
+
+### Second-Order Attacks
+- Does Function A STORE data that Function B later EXECUTES or TRUSTS?
+- Is there a time gap between store and use where state can be corrupted?
+
+### Resource/Error Interaction
+- What happens if Function A fails halfway and Function B runs on partial state?
+- Can resource exhaustion (OOM, disk full) trigger an exploitable path?
+
+### Caller Trust Violations
+- Does Caller C assume Functions A+B together guarantee some property?
+- Can an attacker violate that guarantee without Caller C noticing?
+
+Design a specific multi-step attack sequence if found.
 """
 
     return f"""Analyze these MULTIPLE functions — {group_desc}.
@@ -615,12 +730,16 @@ class VulnAnalyzer:
         chunk: FunctionChunk,
         prompt_type: str = "structural",
         cross_file: str = "",
+        callers: List[str] = None,
+        callees: List[str] = None,
     ) -> Optional[VulnSample]:
         """単一関数の解析"""
         if prompt_type == "structural":
             user_prompt = build_structural_prompt(chunk, cross_file)
         elif prompt_type == "attacker":
             user_prompt = build_attacker_prompt(chunk, cross_file)
+        elif prompt_type == "semantic":
+            user_prompt = build_semantic_prompt(chunk, callers=callers, callees=callees, cross_file=cross_file)
         elif prompt_type == "php":
             user_prompt = build_php_prompt(chunk)
         else:
@@ -655,22 +774,32 @@ class VulnAnalyzer:
         # 多すぎるとKVキャッシュが溢れてスループットが下がる
         sem = asyncio.Semaphore(48)
 
-        async def _analyze_with_sem(chunk, prompt_type, cross_file):
+        async def _analyze_with_sem(chunk, prompt_type, cross_file, callers, callees):
             async with sem:
-                return await self.analyze_chunk(chunk, prompt_type, cross_file=cross_file)
+                return await self.analyze_chunk(chunk, prompt_type, cross_file=cross_file, callers=callers, callees=callees)
 
         tasks = []
         for chunk in chunks:
             cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
+            callers = list(omniscient.reverse_graph.get(chunk.function_name, []))[:8] if omniscient else []
+            callees = list(omniscient.call_graph.get(chunk.function_name, []))[:8] if omniscient else []
+
             if chunk.language == "php":
                 prompt_type = "php"
-            elif getattr(chunk, 'codeql_confirmed', False) or (
-                getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks
-            ) or chunk.priority >= 5:
+            elif getattr(chunk, 'codeql_confirmed', False):
+                prompt_type = "attacker"
+            elif getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks:
+                prompt_type = "attacker"
+            elif chunk.priority >= 6:
+                # 高priority → semantic（意味論的矛盾、未知バグ発見に有効）
+                prompt_type = "semantic"
+            elif chunk.priority >= 3:
+                # 中priority → attacker
                 prompt_type = "attacker"
             else:
+                # 低priority → structural
                 prompt_type = "structural"
-            tasks.append(_analyze_with_sem(chunk, prompt_type, cross_file))
+            tasks.append(_analyze_with_sem(chunk, prompt_type, cross_file, callers, callees))
 
         # 全タスクを一気に投げてセマフォで流量制御
         done_count = 0

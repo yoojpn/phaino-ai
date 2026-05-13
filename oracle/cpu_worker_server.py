@@ -130,24 +130,51 @@ async def exec_code(req: ExecRequest):
     """
     ReActループからのコード実行リクエストを処理。
     Python/Shell/C++を安全に実行して結果を返す。
+    ネットワークは unshare -n で遮断（外部への通信を物理的に防止）
     """
     try:
+        # unshare -n でネットワーク名前空間を分離（外部通信遮断）
+        # unshareが利用可能か確認
+        unshare_available = False
+        try:
+            check = await asyncio.create_subprocess_exec(
+                "unshare", "--version",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(check.communicate(), timeout=3)
+            unshare_available = check.returncode == 0
+        except Exception:
+            pass
+
+        def _wrap_with_network_isolation(cmd: list) -> list:
+            if unshare_available:
+                return ["unshare", "-n", "--"] + cmd
+            return cmd
+
         if req.language == "python":
+            cmd = ["python3", "-c", req.code]
             proc = await asyncio.create_subprocess_exec(
-                "python3", "-c", req.code,
+                *_wrap_with_network_isolation(cmd),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
         elif req.language == "shell":
-            proc = await asyncio.create_subprocess_shell(
-                req.code,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            if unshare_available:
+                proc = await asyncio.create_subprocess_exec(
+                    "unshare", "-n", "--", "bash", "-c", req.code,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    req.code,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
         elif req.language in ("cpp", "c"):
-            # C/C++はコンパイルして実行
             ext = ".cpp" if req.language == "cpp" else ".c"
             compiler = "g++" if req.language == "cpp" else "gcc"
             with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="w") as f:
@@ -155,15 +182,19 @@ async def exec_code(req: ExecRequest):
                 src = f.name
             out = src.replace(ext, "")
             compile_proc = await asyncio.create_subprocess_exec(
-                compiler, "-o", out, src, "-fsanitize=address", "-O1",
+                compiler, "-o", out, src,
+                "-fsanitize=address,undefined", "-O1", "-g",
+                "-fno-omit-frame-pointer",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             cout, cerr = await asyncio.wait_for(compile_proc.communicate(), timeout=30)
             if compile_proc.returncode != 0:
                 return ExecResponse(stdout="", stderr=cerr.decode(), returncode=1)
+            # 実行時はネットワーク遮断
+            cmd = [out]
             proc = await asyncio.create_subprocess_exec(
-                out,
+                *_wrap_with_network_isolation(cmd),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -187,6 +218,131 @@ async def exec_code(req: ExecRequest):
 
     except Exception as e:
         return ExecResponse(stdout="", stderr=str(e), returncode=-1)
+
+
+
+class PocRequest(BaseModel):
+    vuln_description: str       # 脆弱性の説明
+    vulnerable_code: str        # 脆弱なコードスニペット
+    language: str = "cpp"       # c / cpp / python
+    repo_path: str = ""         # clone済みリポジトリパス（オプション）
+    timeout: int = 30
+
+
+class PocResponse(BaseModel):
+    crashed: bool = False
+    crash_type: str = ""        # heap-buffer-overflow, use-after-free, etc.
+    poc_code: str = ""
+    asan_output: str = ""
+    error: str = ""
+
+
+@app.post("/exec_poc", response_model=PocResponse)
+async def exec_poc(req: PocRequest):
+    """
+    LLMが生成したPoCコードをASan付きでコンパイル・実行してクラッシュを確認する。
+    ネットワーク遮断（unshare -n）でサンドボックス実行。
+    外部への通信は物理的に不可能。
+    """
+    if req.language not in ("c", "cpp", "python"):
+        return PocResponse(error=f"unsupported language: {req.language}")
+
+    try:
+        # unshare利用可否確認
+        try:
+            chk = await asyncio.create_subprocess_exec(
+                "unshare", "--version",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(chk.communicate(), timeout=3)
+            unshare_ok = chk.returncode == 0
+        except Exception:
+            unshare_ok = False
+
+        if req.language in ("c", "cpp"):
+            ext = ".cpp" if req.language == "cpp" else ".c"
+            compiler = "g++" if req.language == "cpp" else "gcc"
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="w") as f:
+                f.write(req.vulnerable_code)
+                src = f.name
+            out = src.replace(ext, "")
+
+            compile_cmd = [
+                compiler, "-o", out, src,
+                "-fsanitize=address,undefined", "-O1", "-g",
+                "-fno-omit-frame-pointer",
+            ]
+            # repo_path のインクルードパスを追加
+            if req.repo_path and Path(req.repo_path).exists():
+                compile_cmd += [f"-I{req.repo_path}/include", f"-I{req.repo_path}"]
+
+            cp = await asyncio.create_subprocess_exec(
+                *compile_cmd,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, cerr = await asyncio.wait_for(cp.communicate(), timeout=60)
+            if cp.returncode != 0:
+                return PocResponse(error=f"compile failed: {cerr.decode()[:1000]}", poc_code=req.vulnerable_code)
+
+            run_cmd = ["unshare", "-n", "--", out] if unshare_ok else [out]
+            rp = await asyncio.create_subprocess_exec(
+                *run_cmd,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                rout, rerr = await asyncio.wait_for(rp.communicate(), timeout=req.timeout)
+            except asyncio.TimeoutError:
+                rp.kill()
+                return PocResponse(error="execution timeout", poc_code=req.vulnerable_code)
+
+            asan_out = rout.decode(errors="replace") + rerr.decode(errors="replace")
+
+            crash_patterns = {
+                "heap-buffer-overflow": "heap-buffer-overflow",
+                "stack-buffer-overflow": "stack-buffer-overflow",
+                "use-after-free": "use-after-free",
+                "double-free": "double-free",
+                "null-dereference": "null-dereference",
+                "undefined-behavior": "runtime error:",
+                "segfault": "signal 11",
+                "abort": "Aborted",
+            }
+            crash_type = ""
+            for ctype, pattern in crash_patterns.items():
+                if pattern.lower() in asan_out.lower():
+                    crash_type = ctype
+                    break
+
+            crashed = bool(crash_type) or rp.returncode not in (0, 1)
+            return PocResponse(
+                crashed=crashed,
+                crash_type=crash_type,
+                poc_code=req.vulnerable_code,
+                asan_output=asan_out[:3000],
+            )
+
+        elif req.language == "python":
+            run_cmd = ["unshare", "-n", "--", "python3", "-c", req.vulnerable_code] if unshare_ok else ["python3", "-c", req.vulnerable_code]
+            rp = await asyncio.create_subprocess_exec(
+                *run_cmd,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                rout, rerr = await asyncio.wait_for(rp.communicate(), timeout=req.timeout)
+            except asyncio.TimeoutError:
+                rp.kill()
+                return PocResponse(error="execution timeout", poc_code=req.vulnerable_code)
+            out_str = rout.decode(errors="replace") + rerr.decode(errors="replace")
+            crashed = rp.returncode != 0
+            return PocResponse(
+                crashed=crashed,
+                crash_type="exception" if crashed else "",
+                poc_code=req.vulnerable_code,
+                asan_output=out_str[:3000],
+            )
+
+    except Exception as e:
+        return PocResponse(error=str(e))
 
 
 @app.post("/build_asan", response_model=BuildAsanResponse)
