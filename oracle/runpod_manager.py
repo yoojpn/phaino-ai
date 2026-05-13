@@ -22,6 +22,12 @@ VALID_GPU_IDS = {
     'NVIDIA A100 80GB PCIe',
     'A100 SXM',
     'NVIDIA A100-SXM4-80GB',
+    'L40',
+    'NVIDIA L40',
+    'L40S',
+    'NVIDIA L40S',
+    'RTX 6000 Ada',
+    'NVIDIA RTX 6000 Ada Generation',
 }
 
 RUNPOD_API_KEY      = os.getenv("RUNPOD_API_KEY", "")
