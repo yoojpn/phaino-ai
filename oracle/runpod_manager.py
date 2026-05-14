@@ -553,11 +553,33 @@ class RunPodManager:
             return ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"]
 
     async def _create_pod(self) -> str:
-        """REST APIで複数GPUタイプを一括指定してPodを作成。On-demand→Spotの順で試す。"""
+        """REST APIで複数GPUタイプを一括指定してPodを作成。A40単体→残りフォールバックの順で試す。"""
         gpu_candidates = await self._get_available_gpus()
         selected_gpus = [g for g in gpu_candidates if g in VALID_GPU_IDS][:8]
         gpu_count = 1
 
+        # A40を単体で最初に試す。失敗したら残り全部で再試行。
+        a40_ids = [g for g in selected_gpus if "A40" in g and "RTX" not in g]
+        fallback_ids = [g for g in selected_gpus if g not in a40_ids]
+        gpu_attempts = []
+        if a40_ids:
+            gpu_attempts.append(a40_ids)
+        if fallback_ids:
+            gpu_attempts.append(fallback_ids)
+        if not gpu_attempts:
+            gpu_attempts.append(selected_gpus)
+
+        last_error = None
+        for gpu_ids in gpu_attempts:
+            logger.info(f"Pod作成GPU試行: {gpu_ids}")
+            result = await self._try_create_pod(gpu_ids, gpu_count)
+            if result:
+                return result
+            last_error = f"GPU {gpu_ids} で作成失敗"
+        raise RuntimeError(f"利用可能なGPUが見つかりません: {last_error}")
+
+    async def _try_create_pod(self, selected_gpus: list, gpu_count: int) -> str | None:
+        """指定GPUリストでPod作成を試みる。成功したらPod IDを返す。"""
         base_payload = {
             "name": RUNPOD_POD_NAME,
             "imageName": POD_IMAGE,
@@ -602,41 +624,33 @@ class RunPodManager:
             },
         }
 
-        attempts = [
-            ("On-demand", {**base_payload, "interruptible": False}),
-        ]
-
-        last_error = None
-        for label, payload in attempts:
-            try:
-                logger.info(f"Pod作成試行: {label} / GPUs: {gpu_candidates[:4]}...")
-                logger.info(f"Pod作成ペイロード imageName={payload.get('imageName')} gpuTypeIds={payload.get('gpuTypeIds')}")
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(
-                        "https://rest.runpod.io/v1/pods",
-                        json=payload,
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        timeout=30,
-                    )
-                    data = resp.json()
-                    if resp.status_code in (200, 201) and isinstance(data, dict) and data.get("id"):
-                        pod_id = data["id"]
-                        dc = data.get("machine", {}).get("dataCenterId", "?")
-                        gpu = data.get("machine", {}).get("gpuTypeId", "?")
-                        logger.info(f"Pod作成成功: {label} ({pod_id}) on {dc} / {gpu}")
-                        return pod_id
-                    else:
-                        err_msg = data.get("error") if isinstance(data, dict) else str(data)
-                        logger.warning(f"{label} 失敗: {err_msg}")
-                        last_error = err_msg
-            except Exception as e:
-                logger.warning(f"{label} 例外: {e}")
-                last_error = str(e)
-
-        raise RuntimeError(f"利用可能なGPUが見つかりません: {last_error}")
+        payload = {**base_payload, "interruptible": False}
+        try:
+            logger.info(f"Pod作成試行: GPUs: {selected_gpus}")
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://rest.runpod.io/v1/pods",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=30,
+                )
+                data = resp.json()
+                if resp.status_code in (200, 201) and isinstance(data, dict) and data.get("id"):
+                    pod_id = data["id"]
+                    dc = data.get("machine", {}).get("dataCenterId", "?")
+                    gpu = data.get("machine", {}).get("gpuTypeId", "?")
+                    logger.info(f"Pod作成成功: ({pod_id}) on {dc} / {gpu}")
+                    return pod_id
+                else:
+                    err_msg = data.get("error") if isinstance(data, dict) else str(data)
+                    logger.warning(f"Pod作成失敗: {err_msg}")
+                    return None
+        except Exception as e:
+            logger.warning(f"Pod作成例外: {e}")
+            return None
 
     async def _delete_pod(self, pod_id: str):
         mutation = """
