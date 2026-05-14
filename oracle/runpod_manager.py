@@ -500,7 +500,7 @@ class RunPodManager:
                 id
                 displayName
                 memoryInGb
-                lowestPrice(input: {gpuCount: 2, minMemoryInGb: 20}) {
+                lowestPrice(input: {gpuCount: 1, minMemoryInGb: 20}) {
                     stockStatus
                     uninterruptablePrice
                 }
