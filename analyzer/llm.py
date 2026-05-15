@@ -541,64 +541,21 @@ Beyond simple buffer overflows — look for SEMANTIC memory bugs:
     else:
         lang_phase = ""
 
-    return f"""You are a world-class vulnerability researcher. Your goal is to find bugs that automated tools and junior researchers MISS — logic bugs, semantic contradictions, implicit assumption violations.
+    return f"""You are an expert vulnerability researcher. Find bugs that tools and humans MISS — semantic contradictions, logic bugs, implicit assumption violations.
 
-## Function: `{chunk.function_name}` in `{chunk.file_path}` (lines {chunk.start_line}-{chunk.end_line})
-
+## `{chunk.function_name}` in `{chunk.file_path}`
 ```{chunk.language}
 {chunk.code}
 ```
-{taint_section}{caller_section}{callee_section}{cross_section}
+{taint_section}{caller_section}{callee_section}{cross_section}{lang_phase}
+## Analysis
+1. What does this function CONTRACT to do (name/comments/caller assumptions) vs what it ACTUALLY does?
+2. What INVARIANTS must hold after return — can any be broken by attacker input?
+3. Trace every ERROR PATH — what state is left on mid-way failure?
+4. What IMPLICIT ASSUMPTIONS exist (no overflow, pointer valid, lock held) — which can be violated?
+5. If vulnerable: exact trigger, sequence, outcome, why a reviewer would miss it.
 
-## Semantic Contradiction Analysis
-
-### Phase 1: Contract vs Implementation
-- What does the function NAME promise? ("validate", "sanitize", "get", "safe_")
-- What do COMMENTS claim this does?
-- What do CALLERS assume is guaranteed after calling this?
-- Does the IMPLEMENTATION actually fulfill ALL of these?
-
-Look for: "validate_X" that doesn't fully validate. Claims to return safe value but can return null/invalid on edge case. Modifies shared state a caller doesn't expect.
-
-### Phase 2: Invariant Violation
-What invariants must hold AFTER this function?
-- Object field consistency (fields that must stay in sync)
-- Memory ownership (clear who owns what after return)
-- Error state (partial failure leaves consistent state)
-
-Can an attacker force a code path where an invariant is broken?
-
-### Phase 3: Caller Trust Violation
-Callers listed above TRUST this function. Find where that trust is misplaced:
-- Does this function skip a check the caller assumes it always performs?
-- Can it return a value the caller treats as validated/safe but isn't?
-- Does it have a hidden side effect the caller doesn't account for?
-
-### Phase 4: Error Path Analysis
-Trace EVERY error/exceptional path:
-- What state is left when the function fails MID-WAY?
-- Can an attacker FORCE an error that leaves exploitable state?
-- Early returns, exception paths, null-check failures — what do they leave behind?
-
-### Phase 5: Implicit Assumptions
-What does this code ASSUME without checking?
-- Integer never overflows at this scale
-- Pointer/reference always valid here
-- Collection entry always exists
-- Lock always held
-- Input always within expected range
-
-Which assumptions can an attacker violate?
-
-### Phase 6: Novel Attack Design
-If you found a semantic contradiction:
-1. Exactly what attacker input/action triggers it?
-2. What is the operation SEQUENCE?
-3. What is the exploitable outcome (crash, UAF, info leak, auth bypass)?
-4. Why would a human reviewer miss this?
-{lang_phase}
-Assign confidence (0-100). Report even at confidence 30 if the logic contradiction is real.
-Call report_vulnerability with findings.
+Confidence 30+ = report it. Call report_vulnerability.
 """
 
 
@@ -772,7 +729,7 @@ class VulnAnalyzer:
         total = len(chunks)
         # vLLMのmax_num_seqs=32に合わせて同時リクエスト数を制限
         # 多すぎるとKVキャッシュが溢れてスループットが下がる
-        sem = asyncio.Semaphore(48)
+        sem = asyncio.Semaphore(64)
 
         async def _analyze_with_sem(chunk, prompt_type, cross_file, callers, callees):
             async with sem:
@@ -835,16 +792,8 @@ class VulnAnalyzer:
     ) -> Optional[VulnSample]:
         """
         tool calling（report_vulnerability）で構造化出力を強制してVulnSampleに変換
-        高優先度チャンク（priority<=2 or CodeQL確認済み）はthinking modeで深く推論する
+        thinkingなし・max_tokens=700でコストを最小化しつつ精度を維持
         """
-        # Mythosと同じ戦略: 高優先度チャンクは推論を深くする
-        use_thinking = (
-            chunk.priority <= 2
-            or getattr(chunk, 'codeql_confirmed', False)
-            or (getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks)
-        )
-        thinking_kwargs = {"thinking": True, "thinking_budget": 2048} if use_thinking else {"thinking": False}
-
         try:
             resp = await self.client.chat.completions.create(
                 model=self.model,
@@ -854,11 +803,9 @@ class VulnAnalyzer:
                 ],
                 tools=[REPORT_TOOL],
                 tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-                max_tokens=3000 if use_thinking else 1500,
+                max_tokens=700,
                 temperature=0.1,
-                extra_body={
-                    "chat_template_kwargs": thinking_kwargs,
-                },
+                extra_body={"chat_template_kwargs": {"thinking": False}},
             )
 
             # tool_callsから引数を取り出す
@@ -890,9 +837,9 @@ class VulnAnalyzer:
                         ],
                         tools=[REPORT_TOOL],
                         tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-                        max_tokens=1500,
+                        max_tokens=700,
                         temperature=0.1,
-                        extra_body={"chat_template_kwargs": {"thinking": False}},  # リトライはthinkingなし
+                        extra_body={"chat_template_kwargs": {"thinking": False}},
                     )
                     msg = resp.choices[0].message
                     if msg.tool_calls:
