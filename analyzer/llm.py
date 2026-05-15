@@ -671,6 +671,46 @@ Call report_vulnerability with your findings.
 
 
 # ===========================
+# Spec-guided prompt (NDSS 2025)
+# ===========================
+
+def build_spec_prompt(chunk: FunctionChunk, cross_file: str = "") -> str:
+    """
+    Specification-guided vulnerability detection (NDSS 2025方式)
+    precondition/postconditionを推論してから実装との乖離を探す
+    """
+    taint_section = ""
+    if getattr(chunk, 'taint_sources', []) or getattr(chunk, 'taint_sinks', []):
+        taint_section = f"\n// Taint: src={chunk.taint_sources[:3]} sink={chunk.taint_sinks[:3]}"
+    codeql_section = f"\n// CodeQL: {chunk.codeql_flow}" if getattr(chunk, 'codeql_confirmed', False) else ""
+    cross_section = f"\n## Context\n{cross_file}" if cross_file else ""
+
+    return f"""You are a formal-methods-aware security researcher.
+
+## `{chunk.function_name}` ({chunk.file_path}){taint_section}{codeql_section}
+```{chunk.language}
+{chunk.code}
+```{cross_section}
+
+## Step 1 — Infer Specification
+- Preconditions: what must be TRUE when this function is called?
+- Postconditions: what must be TRUE when this function returns?
+- Invariants: what must hold throughout execution?
+- Implicit contracts: what do callers assume this function guarantees?
+
+## Step 2 — Find Spec Violations
+For each precondition: is there a path where it's NOT enforced?
+For each postcondition: is there a path where it's NOT satisfied?
+Can an attacker trigger a partial failure that leaves broken state?
+
+## Step 3 — Exploit Design
+Exact input that violates the spec → what does the attacker gain (UAF/OOB/auth bypass/etc)?
+
+Confidence 35+ = report. Call report_vulnerability.
+"""
+
+
+# ===========================
 # LLMクライアント
 # ===========================
 class VulnAnalyzer:
@@ -697,6 +737,8 @@ class VulnAnalyzer:
             user_prompt = build_attacker_prompt(chunk, cross_file)
         elif prompt_type == "semantic":
             user_prompt = build_semantic_prompt(chunk, callers=callers, callees=callees, cross_file=cross_file)
+        elif prompt_type == "spec":
+            user_prompt = build_spec_prompt(chunk, cross_file)
         elif prompt_type == "php":
             user_prompt = build_php_prompt(chunk)
         else:
@@ -736,25 +778,47 @@ class VulnAnalyzer:
                 return await self.analyze_chunk(chunk, prompt_type, cross_file=cross_file, callers=callers, callees=callees)
 
         tasks = []
+        # 関数名パターン（spec-guidedが効く関数種別）
+        SPEC_PATTERNS = re.compile(
+            r'(valid|sanitiz|check|verify|auth|ensure|assert|guard|enforce|init|setup|create|alloc|parse|decode|deserializ)',
+            re.IGNORECASE
+        )
+        # 攻撃者視点が効く危険シンク関連パターン
+        ATTACKER_PATTERNS = re.compile(
+            r'(exec|eval|query|render|send|write|copy|memcpy|sprintf|format|request|response|upload|download|open|read|recv)',
+            re.IGNORECASE
+        )
         for chunk in chunks:
             cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
             callers = list(omniscient.reverse_graph.get(chunk.function_name, []))[:8] if omniscient else []
             callees = list(omniscient.call_graph.get(chunk.function_name, []))[:8] if omniscient else []
 
+            has_taint = getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks
+            fn = chunk.function_name
+
             if chunk.language == "php":
                 prompt_type = "php"
             elif getattr(chunk, 'codeql_confirmed', False):
+                # CodeQL確認済み → attacker（実証パス確認）
                 prompt_type = "attacker"
-            elif getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks:
+            elif has_taint and chunk.priority >= 6:
+                # taintパス確認済み + 高priority → semantic（意味論的矛盾を深掘り）
+                prompt_type = "semantic"
+            elif has_taint:
+                # taintパスあり → attacker（データフロー追跡）
+                prompt_type = "attacker"
+            elif SPEC_PATTERNS.search(fn):
+                # validate/auth/parse系 → spec（仕様違反を探す）
+                prompt_type = "spec"
+            elif ATTACKER_PATTERNS.search(fn) or chunk.language in ("c", "cpp"):
+                # 危険シンク系 or C/C++ → attacker
                 prompt_type = "attacker"
             elif chunk.priority >= 6:
-                # 高priority → semantic（意味論的矛盾、未知バグ発見に有効）
+                # 高priority → semantic
                 prompt_type = "semantic"
             elif chunk.priority >= 3:
-                # 中priority → attacker
                 prompt_type = "attacker"
             else:
-                # 低priority → structural
                 prompt_type = "structural"
             tasks.append(_analyze_with_sem(chunk, prompt_type, cross_file, callers, callees))
 
@@ -1019,36 +1083,101 @@ Code (excerpt):
         return True, f"verification error: {e}"
 
 
+
+# ===========================
+# 軽量FPプレフィルタ（2段階検証の第1段）
+# ===========================
+
+QUICK_FP_PROMPT = """\
+You are a fast false-positive filter. Given a bug report, answer in JSON only:
+{"is_fp": true/false, "reason": "one sentence"}
+
+Mark as FP (is_fp=true) ONLY if:
+- The dangerous sink is clearly unreachable from user input
+- The "vulnerability" is in dead code or test-only code
+- There is an obvious framework/middleware that fully mitigates it
+
+If uncertain, mark is_fp=false (keep it for deeper review).
+"""
+
+async def quick_fp_check(
+    client,
+    model: str,
+    sample: VulnSample,
+) -> bool:
+    """
+    max_tokens=150の軽量FPチェック。
+    明らかなFPを重いverify_findingの前に除去する。
+    戻り値: True=FPではない(keep) / False=FP(drop)
+    """
+    snippet = f"Function: {sample.context.function if sample.context else '?'}\n"
+    snippet += f"Why vulnerable: {sample.reasoning.why_vulnerable[:300] if sample.reasoning else ''}\n"
+    snippet += f"False positive risk: {sample.reasoning.false_positive_risk[:200] if sample.reasoning else ''}\n"
+    snippet += f"Code:\n```\n{sample.code[:400]}\n```"
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": QUICK_FP_PROMPT},
+                {"role": "user", "content": snippet},
+            ],
+            max_tokens=150,
+            temperature=0.0,
+            extra_body={"chat_template_kwargs": {"thinking": False}},
+        )
+        raw = resp.choices[0].message.content or ""
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        m = re.search(r"\{.*?\}", raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+            if data.get("is_fp", False):
+                print(f"  [quick-FP] drop: {sample.context.function if sample.context else '?'} — {data.get('reason','')[:80]}")
+                return False
+    except Exception:
+        pass
+    return True
+
+
 async def verify_findings_batch(
     client,
     model: str,
     samples: List[VulnSample],
 ) -> List[VulnSample]:
     """
-    発見した全脆弱性を検証エージェントでフィルタリングする。
+    2段階FP除去:
+    Stage1: quick_fp_check (max_tokens=150) で明らかなFPを高速除去
+    Stage2: verify_finding (max_tokens=300) で残りを深くトリアージ
     Mythosの「最後にエージェントを走らせて重要度が低いものを除外」に相当。
     """
     if not samples:
         return samples
 
-    print(f"[*] 検証エージェント: {len(samples)}件をセカンドパスで確認...")
-    tasks = [verify_finding(client, model, s) for s in samples]
+    print(f"[*] Stage1 軽量FPフィルタ: {len(samples)}件...")
+    stage1_tasks = [quick_fp_check(client, model, s) for s in samples]
+    stage1_results = await asyncio.gather(*stage1_tasks, return_exceptions=True)
+    after_stage1 = [s for s, keep in zip(samples, stage1_results)
+                    if not isinstance(keep, Exception) and keep]
+    dropped_stage1 = len(samples) - len(after_stage1)
+    print(f"[*] Stage1完了: {dropped_stage1}件除去 → {len(after_stage1)}件残存")
+
+    print(f"[*] Stage2 詳細検証: {len(after_stage1)}件をセカンドパスで確認...")
+    tasks = [verify_finding(client, model, s) for s in after_stage1]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     approved = []
     rejected = 0
-    for sample, result in zip(samples, results):
+    for sample, result in zip(after_stage1, results):
         if isinstance(result, Exception):
-            approved.append(sample)  # エラーは保守的にapprove
+            approved.append(sample)
             continue
         ok, reason = result
         if ok:
             approved.append(sample)
         else:
             rejected += 1
-            print(f"  [-] 検証エージェントがリジェクト: {sample.context.function if sample.context else '?'} — {reason[:80]}")
+            print(f"  [-] Stage2リジェクト: {sample.context.function if sample.context else '?'} — {reason[:80]}")
 
-    print(f"[+] 検証完了: {len(approved)}件承認 / {rejected}件リジェクト")
+    print(f"[+] 検証完了: {len(approved)}件承認 / {dropped_stage1+rejected}件リジェクト")
     return approved
 
 

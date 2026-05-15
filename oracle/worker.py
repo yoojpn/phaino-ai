@@ -295,6 +295,21 @@ class ScanWorker:
             except Exception as e:
                 logger.warning(f"ファイルランキングエラー: {e}")
 
+            # IRIS方式 (ICLR 2025): LLMがアプリ固有のソース/シンク仕様を動的生成
+            # 標準CodeQLクエリで見逃すカスタムソース・シンクを補完する
+            try:
+                from oracle.cpu_worker_server import iris_generate_codeql_specs
+                iris_results = await iris_generate_codeql_specs(
+                    chunks=chunks,
+                    llm_base_url=os.environ.get("LLM_BASE_URL", ""),
+                    llm_api_key=os.environ.get("LLM_API_KEY", ""),
+                    llm_model=LLM_MODEL,
+                )
+                if iris_results:
+                    self._log(job_id, f"  IRIS: {len(iris_results)}件のカスタムシンク検出\n")
+            except Exception as e:
+                logger.warning(f"IRISエラー: {e}")
+
             # 高優先度（CodeQL確認済み）はReActループで先に処理
             react_chunks = [
                 c for c in chunks

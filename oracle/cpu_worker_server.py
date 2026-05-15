@@ -870,6 +870,96 @@ def merge_codeql_results(chunks, codeql_results: List[Dict]):
             break
 
 
+async def iris_generate_codeql_specs(
+    chunks: list,
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+) -> List[Dict]:
+    """
+    IRIS方式 (ICLR 2025): LLMがCodeQL用カスタムソース/シンク仕様を動的生成。
+    標準クエリで見逃すアプリ固有のソース・シンクを補完する。
+
+    手順:
+    1. 高priorityチャンクのコードサマリをLLMに渡す
+    2. LLMがこのコードベース固有のtaintソース・シンク関数名を推論
+    3. 返ってきた仕様をmerge_codeql_resultsに渡せるDictリストで返す
+    """
+    if not chunks:
+        return []
+
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(base_url=llm_base_url, api_key=llm_api_key)
+
+        # 高priorityチャンクのサマリを収集（最大40件）
+        high_pri = sorted(chunks, key=lambda c: c.priority, reverse=True)[:40]
+        summaries = []
+        for c in high_pri:
+            first_line = c.code.split("\n")[0][:120]
+            summaries.append(f"- {c.function_name} ({c.file_path}): {first_line}")
+        summary_text = "\n".join(summaries)
+
+        resp = await client.chat.completions.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": (
+                    "You are a static analysis expert. Given function signatures from a codebase, "
+                    "identify application-specific taint SOURCES (functions/params that receive untrusted input) "
+                    "and SINKS (functions that perform dangerous operations). "
+                    "Respond with JSON only: "
+                    "{\"sources\": [{\"function\": \"...\", \"file\": \"...\", \"reason\": \"...\"}], "
+                    "\"sinks\": [{\"function\": \"...\", \"file\": \"...\", \"reason\": \"...\"}]}"
+                )},
+                {"role": "user", "content": f"Analyze these functions:\n{summary_text}"},
+            ],
+            max_tokens=600,
+            temperature=0.0,
+            extra_body={"chat_template_kwargs": {"thinking": False}},
+        )
+        raw = resp.choices[0].message.content or ""
+        import re as _re
+        raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
+        m = _re.search(r"\{[\s\S]+\}", raw)
+        if not m:
+            return []
+        data = json.loads(m.group(0))
+
+        # チャンクにIRIS由来のtaint情報をマージ
+        func_map = {c.function_name: c for c in chunks}
+        results = []
+        for src in data.get("sources", []):
+            fn = src.get("function", "")
+            if fn in func_map:
+                c = func_map[fn]
+                label = f"[IRIS-source] {src.get('reason','')[:60]}"
+                if label not in c.taint_sources:
+                    c.taint_sources.append(label)
+        for sink in data.get("sinks", []):
+            fn = sink.get("function", "")
+            if fn in func_map:
+                c = func_map[fn]
+                label = f"[IRIS-sink] {sink.get('reason','')[:60]}"
+                if label not in c.taint_sinks:
+                    c.taint_sinks.append(label)
+                # シンクとして特定された関数のpriorityを引き上げ
+                c.priority = max(c.priority, 6)
+                results.append({
+                    "rule_id": "IRIS-LLM",
+                    "message": f"IRIS: {sink.get('reason','')[:100]}",
+                    "source_file": c.file_path,
+                    "source_line": c.start_line,
+                    "sink_file": c.file_path,
+                    "sink_line": c.start_line,
+                    "flow_length": 1,
+                })
+        logger.info(f"  [IRIS] ソース{len(data.get('sources',[]))}件 / シンク{len(data.get('sinks',[]))}件 検出")
+        return results
+    except Exception as e:
+        logger.warning(f"  [IRIS] スペック生成エラー: {e}")
+        return []
+
+
 async def run_codeql(tmpdir: str, files, chunks) -> List[Dict]:
     """
     CodeQL CLIを使ってtaint解析を実行。
