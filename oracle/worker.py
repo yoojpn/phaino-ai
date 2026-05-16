@@ -159,7 +159,7 @@ class ScanWorker:
                 for _ in range(360):
                     await asyncio.sleep(5)
                     try:
-                        async with _httpx.AsyncClient(timeout=15) as client:
+                        async with _httpx.AsyncClient(timeout=60) as client:
                             r = await client.get(f"{cpu_url}/analyze/result/{job_id_cpu}")
                             data = r.json()
                             if data.get("status") == "running":
@@ -169,8 +169,9 @@ class ScanWorker:
                             return data
                     except RuntimeError:
                         raise
-                    except Exception as e:
-                        raise RuntimeError(f"ポーリングエラー: {type(e).__name__}: {e}")
+                    except Exception:
+                        # タイムアウト等は無視してリトライ
+                        continue
                 raise RuntimeError("CPUワーカー解析タイムアウト（30分）")
 
             async def _start_and_poll_codeql(analyze_result):
