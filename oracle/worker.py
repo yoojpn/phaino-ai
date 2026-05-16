@@ -105,12 +105,23 @@ class ScanWorker:
             from config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
 
             # ===========================
-            # Step 1-3: CPUポッドで実行
-            # (git clone / AST / 多段taint伝播)
+            # Step 1-3 & 5: CPUポッドとA40を並行起動
             # ===========================
-            self._log(job_id, "\n[Step 1-3] CPUポッド起動中...\n")
-            cpu_url = await self.cpu_manager.start_pod()
-            self._log(job_id, f"  CPUポッド ready: {cpu_url}\n")
+            self._log(job_id, "\n[Step 1-3] CPUポッド・A40 並行起動中...\n")
+
+            async def _start_cpu():
+                url = await self.cpu_manager.start_pod()
+                self._log(job_id, f"  CPUポッド ready: {url}\n")
+                return url
+
+            async def _start_a40():
+                url = await self.manager.start_pod()
+                self._log(job_id, f"  A40 ready: {url}\n")
+                return url
+
+            cpu_url, vllm_url = await asyncio.gather(_start_cpu(), _start_a40())
+
+            os.environ["LLM_BASE_URL"] = vllm_url
 
             self._log(job_id, "  git clone / AST解析 / 多段taint伝播 実行中...\n")
 
@@ -290,13 +301,9 @@ class ScanWorker:
             ))
 
             # ===========================
-            # Step 4: LLM解析（A40起動）
+            # Step 4: LLM解析（A40は既に起動済み）
             # ===========================
-            self._log(job_id, "\n[Step 5] LLM解析 - A40起動中...\n")
-            vllm_url = await self.manager.start_pod()
-            self._log(job_id, f"  vLLM URL: {vllm_url}\n")
-
-            os.environ["LLM_BASE_URL"] = vllm_url
+            self._log(job_id, "\n[Step 5] LLM解析開始...\n")
 
             llm_analyzer = VulnAnalyzer()
 
