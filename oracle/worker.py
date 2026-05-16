@@ -159,7 +159,7 @@ class ScanWorker:
                 for _ in range(360):
                     await asyncio.sleep(5)
                     try:
-                        async with _httpx.AsyncClient(timeout=60) as client:
+                        async with _httpx.AsyncClient(timeout=600) as client:
                             r = await client.get(f"{cpu_url}/analyze/result/{job_id_cpu}")
                             data = r.json()
                             if data.get("status") == "running":
