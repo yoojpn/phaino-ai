@@ -380,6 +380,61 @@ async def api_runpod_status(request: Request):
     return JSONResponse(status)
 
 
+@app.get("/api/runpod/inventory")
+async def api_runpod_inventory(request: Request):
+    """A40・CPUポッドの在庫確認"""
+    manager: RunPodManager = request.app.state.manager
+    try:
+        gpu_candidates = await manager._get_available_gpus()
+        # A40在庫を個別確認
+        a40_available = any("A40" in g for g in gpu_candidates)
+    except Exception as e:
+        gpu_candidates = []
+        a40_available = False
+
+    # CPUポッドの在庫確認（試行して判断）
+    cpu_available = None
+    try:
+        import httpx as _httpx
+        async with _httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://rest.runpod.io/v1/pods",
+                json={
+                    "name": "inventory-check",
+                    "imageName": "busybox",
+                    "cloudType": "COMMUNITY",
+                    "computeType": "CPU",
+                    "cpuFlavorIds": ["cpu3c"],
+                    "vcpuCount": 1,
+                    "containerDiskInGb": 5,
+                },
+                headers={
+                    "Authorization": f"Bearer {manager.api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            if resp.status_code in (200, 201) and data.get("id"):
+                cpu_available = True
+                # すぐ削除
+                await client.delete(
+                    f"https://rest.runpod.io/v1/pods/{data['id']}",
+                    headers={"Authorization": f"Bearer {manager.api_key}"},
+                    timeout=10,
+                )
+            else:
+                cpu_available = False
+    except Exception:
+        cpu_available = None
+
+    return JSONResponse({
+        "a40_available": a40_available,
+        "gpu_inventory": gpu_candidates[:10],
+        "cpu_available": cpu_available,
+    })
+
+
 @app.post("/api/job/{job_id}/cancel")
 async def api_cancel_job(request: Request, job_id: str):
     """ジョブキャンセル"""

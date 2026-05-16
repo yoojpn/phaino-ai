@@ -442,6 +442,8 @@ a:hover { color: var(--accent-hover); }
     <span class="logo">⚡ phaino_ai</span>
     <span class="subtitle">脆弱性検出特化AIパイプライン</span>
     <div class="runpod-badge" id="runpod-badge">● RunPod確認中...</div>
+    <button id="inventory-btn" onclick="checkInventory()" style="margin-left:10px;padding:4px 10px;font-size:0.78rem;background:transparent;border:1px solid var(--text-muted);color:var(--text-muted);border-radius:4px;cursor:pointer;">在庫確認</button>
+    <div id="inventory-result" style="display:none;margin-left:10px;font-size:0.78rem;"></div>
   </div>
 </header>
 
@@ -706,6 +708,28 @@ setInterval(loadJobs, 10000);
 // ===========================
 // RunPodステータス
 // ===========================
+async function checkInventory() {
+  const btn = document.getElementById("inventory-btn");
+  const result = document.getElementById("inventory-result");
+  btn.textContent = "確認中...";
+  btn.disabled = true;
+  result.style.display = "none";
+  try {
+    const resp = await fetch("https://api.phaino-ai.com/api/runpod/inventory", { credentials: "include" });
+    const data = await resp.json();
+    const a40 = data.a40_available ? "🟢 A40あり" : "🔴 A40なし";
+    const cpu = data.cpu_available === true ? "🟢 CPUあり" : data.cpu_available === false ? "🔴 CPUなし" : "⚪ CPU不明";
+    const gpus = (data.gpu_inventory || []).join(", ") || "なし";
+    result.innerHTML = `${a40} / ${cpu}<br><span style="color:var(--text-muted)">在庫: ${gpus}</span>`;
+    result.style.display = "inline-block";
+  } catch(e) {
+    result.textContent = "確認失敗";
+    result.style.display = "inline-block";
+  }
+  btn.textContent = "在庫確認";
+  btn.disabled = false;
+}
+
 async function updateRunpodBadge() {
   try {
     const resp = await fetch("https://api.phaino-ai.com/api/runpod/status", { credentials: "include" });
