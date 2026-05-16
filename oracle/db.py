@@ -55,13 +55,14 @@ class JobDB:
         target_type: str,
         target_display: str,
         options: Dict[str, Any],
+        status: str = "queued",
     ):
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO jobs
                     (id, target, target_type, target_display, options, status, created_at)
-                VALUES (?, ?, ?, ?, ?, 'queued', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -69,6 +70,7 @@ class JobDB:
                     target_type,
                     target_display,
                     json.dumps(options, ensure_ascii=False),
+                    status,
                     datetime.utcnow().isoformat(),
                 ),
             )

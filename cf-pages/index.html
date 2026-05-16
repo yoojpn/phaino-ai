@@ -644,14 +644,24 @@ async function submitForm(formId, endpoint, isMultipart) {
 
     try {
       const fd = new FormData(form);
-      // チェックボックスをboolに変換
       ["no_docker","no_react"].forEach(key => {
         fd.set(key, form.querySelector(`[name=${key}]`).checked ? "true" : "false");
       });
       const maxFn = form.querySelector('[name=max_functions]');
       if (maxFn) fd.set("max_functions", maxFn.value || "0");
 
-      const resp = await fetch(endpoint, { method: "POST", body: fd });
+      // A40在庫確認（githubスキャンのみ、他エンドポイントも同様）
+      const a40Resp = await fetch("https://api.phaino-ai.com/api/runpod/a40_available", { credentials: "include" });
+      const a40Data = await a40Resp.json();
+      if (!a40Data.a40_available) {
+        overlay.style.display = "none";
+        const ok = confirm("A40の空きがありません。\nキューに入れますか？\n（A40の在庫が確保され次第、自動的に実行されます）");
+        if (!ok) return;
+        fd.set("force_queue", "true");
+        overlay.style.display = "flex";
+      }
+
+      const resp = await fetch(endpoint, { method: "POST", body: fd, credentials: "include" });
       if (!resp.ok) {
         const err = await resp.json();
         alert("エラー: " + (err.detail || resp.statusText));

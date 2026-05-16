@@ -553,17 +553,11 @@ class RunPodManager:
             return ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"]
 
     async def _create_pod(self) -> str:
-        """REST APIで複数GPUタイプを一括指定してPodを作成。A40を常に最初に試す。"""
-        gpu_candidates = await self._get_available_gpus()
-        selected_gpus = [g for g in gpu_candidates if g in VALID_GPU_IDS][:8]
+        """REST APIでA40のみ指定してPodを作成。A40以外は使わない。"""
         gpu_count = 1
-
-        # A40は在庫APIに返ってこなくても必ず最初に試す
+        # A40のみ。在庫APIに出てこなくても試行する。
         a40_ids = ["NVIDIA A40"]
-        fallback_ids = [g for g in selected_gpus if "A40" not in g]
         gpu_attempts = [a40_ids]
-        if fallback_ids:
-            gpu_attempts.append(fallback_ids)
 
         last_error = None
         for gpu_ids in gpu_attempts:

@@ -45,18 +45,41 @@ class ScanWorker:
     async def run_forever(self):
         """無限ループでジョブキューを監視"""
         logger.info("ScanWorker started")
+        poll_count = 0
         while True:
             try:
                 job = self.db.pop_next_queued()
                 if job:
                     await self._run_job(job)
                 else:
+                    # 60秒ごとにqueued_waitingジョブのA40在庫を確認
+                    poll_count += 1
+                    if poll_count >= 12:
+                        poll_count = 0
+                        await self._promote_waiting_jobs()
                     await asyncio.sleep(5)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.exception(f"Worker error: {e}")
                 await asyncio.sleep(10)
+
+    async def _promote_waiting_jobs(self):
+        """A40在庫が空いたらqueued_waitingをqueuedに昇格"""
+        waiting = self.db.list_jobs(status="queued_waiting", limit=50)
+        if not waiting:
+            return
+        try:
+            gpu_candidates = await self.manager._get_available_gpus()
+            a40_available = any("A40" in g for g in gpu_candidates)
+        except Exception:
+            a40_available = False
+        if a40_available:
+            logger.info(f"A40在庫確認: queued_waiting {len(waiting)}件をqueuedに昇格")
+            for job in waiting:
+                self.db.update_job(job["id"], status="queued")
+        else:
+            logger.debug("A40在庫なし: queued_waitingは待機継続")
 
     # ===========================
     # メインジョブ処理

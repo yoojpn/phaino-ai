@@ -210,12 +210,25 @@ async def scan_github(
     no_docker: bool = Form(False),
     max_functions: int = Form(5000),
     no_react: bool = Form(False),
+    force_queue: bool = Form(False),
 ):
     """GitHubリポジトリURLでスキャン"""
     if not repo_url.startswith("https://github.com/"):
         raise HTTPException(status_code=400, detail="GitHub URLを入力してください")
 
     db: JobDB = request.app.state.db
+    manager: RunPodManager = request.app.state.manager
+
+    # A40在庫確認（force_queue=Trueはユーザーがキュー投入を承認済み）
+    if not force_queue:
+        try:
+            gpu_candidates = await manager._get_available_gpus()
+            a40_available = any("A40" in g for g in gpu_candidates)
+        except Exception:
+            a40_available = False
+        if not a40_available:
+            return JSONResponse({"a40_unavailable": True}, status_code=200)
+
     job_id = _create_job(
         db=db,
         target=repo_url,
@@ -224,8 +237,10 @@ async def scan_github(
         no_docker=no_docker,
         max_functions=max_functions,
         no_react=no_react,
+        status="queued_waiting" if force_queue else "queued",
     )
-    return JSONResponse({"job_id": job_id, "status": "queued"})
+    status = "queued_waiting" if force_queue else "queued"
+    return JSONResponse({"job_id": job_id, "status": status})
 
 
 @app.post("/api/scan/zip")
@@ -435,6 +450,18 @@ async def api_runpod_inventory(request: Request):
     })
 
 
+@app.get("/api/runpod/a40_available")
+async def api_a40_available(request: Request):
+    """A40在庫確認（スキャン前チェック用）"""
+    manager: RunPodManager = request.app.state.manager
+    try:
+        gpu_candidates = await manager._get_available_gpus()
+        a40_available = any("A40" in g for g in gpu_candidates)
+    except Exception:
+        a40_available = False
+    return JSONResponse({"a40_available": a40_available})
+
+
 @app.post("/api/job/{job_id}/cancel")
 async def api_cancel_job(request: Request, job_id: str):
     """ジョブキャンセル"""
@@ -469,6 +496,7 @@ def _create_job(
     max_functions: int = 5000,
     no_react: bool = False,
     target_display: Optional[str] = None,
+    status: str = "queued",
 ) -> str:
     job_id = str(uuid.uuid4())
     db.create_job(
@@ -482,6 +510,7 @@ def _create_job(
             "max_functions": max_functions,
             "no_react": no_react,
         },
+        status=status,
     )
-    logger.info(f"Job created: {job_id} | {target_type} | {target_display or target}")
+    logger.info(f"Job created: {job_id} | {target_type} | {target_display or target} | status={status}")
     return job_id
