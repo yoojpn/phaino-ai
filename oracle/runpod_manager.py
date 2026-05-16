@@ -222,13 +222,11 @@ class CpuPodManager:
                 for _ in range(6):
                     try:
                         async with httpx.AsyncClient() as client:
-                            r = await client.post(
-                                f"{url}/analyze",
-                                json={"target": "__warmup__", "target_type": "github", "options": {}},
+                            r = await client.get(
+                                f"{url}/health",
                                 timeout=5,
                             )
-                            # 400/422はエンドポイントが存在する証拠
-                            if r.status_code in (200, 400, 422):
+                            if r.status_code == 200:
                                 analyze_ok = True
                                 break
                     except Exception:
