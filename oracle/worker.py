@@ -125,29 +125,20 @@ class ScanWorker:
 
             # ===========================
             # Step 1-3 & 5: CPUポッドとA40を並行起動
+            # CPUがready次第即解析開始、A40は並行して起動
             # ===========================
             self._log(job_id, "\n[Step 1-3] CPUポッド・A40 並行起動中...\n")
 
-            async def _start_cpu():
-                url = await self.cpu_manager.start_pod()
-                self._log(job_id, f"  CPUポッド ready: {url}\n")
-                return url
+            # A40をバックグラウンドで起動
+            a40_task = asyncio.create_task(self.manager.start_pod())
 
-            async def _start_a40():
-                url = await self.manager.start_pod()
-                self._log(job_id, f"  A40 ready: {url}\n")
-                return url
-
+            # CPUポッドを起動して即解析開始
             try:
-                cpu_url, vllm_url = await asyncio.gather(_start_cpu(), _start_a40())
+                cpu_url = await self.cpu_manager.start_pod()
+                self._log(job_id, f"  CPUポッド ready: {cpu_url}\n")
             except Exception as e:
-                if "A40" in str(e) or "GPU" in str(e) or "instances" in str(e):
-                    self._log(job_id, f"  A40在庫なし: キューに戻します\n")
-                    self.db.update_job(job_id, status="queued_waiting")
-                    return
+                a40_task.cancel()
                 raise
-
-            os.environ["LLM_BASE_URL"] = vllm_url
 
             self._log(job_id, "  git clone / AST解析 / 多段taint伝播 実行中...\n")
 
@@ -341,9 +332,19 @@ class ScanWorker:
             ))
 
             # ===========================
-            # Step 4: LLM解析（A40は既に起動済み）
+            # Step 4: LLM解析（A40待機→解析開始）
             # ===========================
-            self._log(job_id, "\n[Step 5] LLM解析開始...\n")
+            self._log(job_id, "\n[Step 5] LLM解析 - A40待機中...\n")
+            try:
+                vllm_url = await a40_task
+                self._log(job_id, f"  A40 ready: {vllm_url}\n")
+            except Exception as e:
+                if "A40" in str(e) or "GPU" in str(e) or "instances" in str(e):
+                    self._log(job_id, f"  A40在庫なし: キューに戻します\n")
+                    self.db.update_job(job_id, status="queued_waiting")
+                    return
+                raise
+            os.environ["LLM_BASE_URL"] = vllm_url
 
             llm_analyzer = VulnAnalyzer()
 
