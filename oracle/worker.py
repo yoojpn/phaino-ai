@@ -119,7 +119,14 @@ class ScanWorker:
                 self._log(job_id, f"  A40 ready: {url}\n")
                 return url
 
-            cpu_url, vllm_url = await asyncio.gather(_start_cpu(), _start_a40())
+            try:
+                cpu_url, vllm_url = await asyncio.gather(_start_cpu(), _start_a40())
+            except Exception as e:
+                if "A40" in str(e) or "GPU" in str(e) or "instances" in str(e):
+                    self._log(job_id, f"  A40在庫なし: キューに戻します\n")
+                    self.db.update_job(job_id, status="queued_waiting")
+                    return
+                raise
 
             os.environ["LLM_BASE_URL"] = vllm_url
 
