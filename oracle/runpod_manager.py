@@ -217,6 +217,29 @@ class CpuPodManager:
                     deadline = asyncio.get_event_loop().time() + CPU_POD_HEALTH_TIMEOUT
                     continue
 
+                # /analyzeエンドポイントの疎通確認（404回避）
+                analyze_ok = False
+                for _ in range(6):
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            r = await client.post(
+                                f"{url}/analyze",
+                                json={"target": "__warmup__", "target_type": "github", "options": {}},
+                                timeout=5,
+                            )
+                            # 400/422はエンドポイントが存在する証拠
+                            if r.status_code in (200, 400, 422):
+                                analyze_ok = True
+                                break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(3)
+
+                if not analyze_ok:
+                    logger.warning("[CPU] /analyze未応答、さらに待機...")
+                    await asyncio.sleep(10)
+                    continue
+
                 return url
             await asyncio.sleep(5)
         raise RuntimeError("CPUワーカー起動タイムアウト")
