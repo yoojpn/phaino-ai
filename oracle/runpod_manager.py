@@ -187,7 +187,6 @@ class CpuPodManager:
                             f"tree_sitter_languages={info.get('tree_sitter_languages','?')}"
                         )
                 except Exception:
-                    logger.info("[CPU] CPUワーカー ready (health取得失敗)")
                     return url
 
                 # commitミスマッチ確認（Oracleのcommitと比較）

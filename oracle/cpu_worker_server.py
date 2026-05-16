@@ -1228,6 +1228,46 @@ async def run_codeql_endpoint(req: CodeQLRequest):
         return CodeQLResponse(error=str(e))
 
 
+
+# 非同期ジョブ管理（524タイムアウト回避）
+_analyze_jobs: Dict[str, Dict] = {}
+
+@app.post("/analyze/start")
+async def analyze_start(req: AnalyzeRequest):
+    """非同期でanalyzeを開始してjob_idを即返す（Cloudflare 100s制限回避）"""
+    import uuid as _uuid
+    job_id = str(_uuid.uuid4())
+    _analyze_jobs[job_id] = {"status": "running", "result": None, "error": None}
+
+    async def _run():
+        try:
+            result = await analyze(req)
+            _analyze_jobs[job_id]["result"] = result
+            _analyze_jobs[job_id]["status"] = "done"
+        except Exception as e:
+            _analyze_jobs[job_id]["error"] = str(e)
+            _analyze_jobs[job_id]["status"] = "error"
+
+    asyncio.create_task(_run())
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/analyze/result/{job_id}")
+async def analyze_result(job_id: str):
+    """analyze/startで開始したジョブの結果をポーリングで取得"""
+    job = _analyze_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] == "running":
+        return JSONResponse({"status": "running"})
+    if job["status"] == "error":
+        _analyze_jobs.pop(job_id, None)
+        return JSONResponse({"status": "error", "error": job["error"]})
+    result = job["result"]
+    _analyze_jobs.pop(job_id, None)
+    return result
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest):
     tmpdir = None
