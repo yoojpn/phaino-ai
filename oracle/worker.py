@@ -42,6 +42,24 @@ class ScanWorker:
         self.report_dir = report_dir
         self._current_job_id: Optional[str] = None
 
+    async def _notify_discord(self, message: str):
+        """Discordのwebhookで通知を送る"""
+        webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
+        user_id = os.environ.get("DISCORD_MENTION_USER_ID", "")
+        if not webhook_url:
+            return
+        mention = f"<@{user_id}> " if user_id else ""
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient() as client:
+                await client.post(
+                    webhook_url,
+                    json={"content": f"{mention}{message}"},
+                    timeout=10,
+                )
+        except Exception as e:
+            logger.warning(f"Discord通知失敗: {e}")
+
     async def run_forever(self):
         """無限ループでジョブキューを監視"""
         logger.info("ScanWorker started")
@@ -52,12 +70,12 @@ class ScanWorker:
                 if job:
                     await self._run_job(job)
                 else:
-                    # 60秒ごとにqueued_waitingジョブのA40在庫を確認
+                    # 10秒ごとにqueued_waitingジョブのA40在庫を確認
                     poll_count += 1
-                    if poll_count >= 12:
+                    if poll_count >= 6:
                         poll_count = 0
                         await self._promote_waiting_jobs()
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(10)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -92,6 +110,7 @@ class ScanWorker:
         options = job.get("options") or {}
 
         self._log(job_id, f"[{datetime.utcnow().isoformat()}] ジョブ開始: {job['target_display']}\n")
+        await self._notify_discord(f"🚀 ジョブ開始: `{job['target_display']}`\nJob ID: `{job_id}`")
 
         try:
             import httpx as _httpx
@@ -594,12 +613,16 @@ class ScanWorker:
                 result_summary=summary,
             )
             logger.info(f"Job {job_id} done: {summary}")
+            await self._notify_discord(
+                f"✅ スキャン完了: `{job['target_display']}`\n"
+                f"検出: {summary.get('total',0)}件 (Critical:{summary.get('critical',0)} High:{summary.get('high',0)} Medium:{summary.get('medium',0)})\n"
+                f"Job ID: `{job_id}`"
+            )
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.exception(f"Job {job_id} failed: {e}")
-            # 両ポッドが起きたままにならないよう停止
             for mgr in (self.cpu_manager, self.manager):
                 try:
                     await mgr.stop_pod()
@@ -609,6 +632,11 @@ class ScanWorker:
                 job_id,
                 status="error",
                 log_append=f"\n[ERROR] {e}\n",
+            )
+            await self._notify_discord(
+                f"❌ ジョブエラー: `{job['target_display']}`\n"
+                f"エラー: {str(e)[:200]}\n"
+                f"Job ID: `{job_id}`"
             )
         finally:
             # フェイルセーフ: 何があっても両ポッドを停止
