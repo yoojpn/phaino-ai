@@ -143,36 +143,13 @@ class ScanWorker:
             self._log(job_id, "  git clone / AST解析 / 多段taint伝播 実行中...\n")
 
             async def _call_analyze():
-                # /analyze/start で即返してポーリング（Cloudflare 100s制限回避）
-                try:
-                    async with _httpx.AsyncClient(timeout=30) as client:
-                        resp = await client.post(
-                            f"{cpu_url}/analyze/start",
-                            json={"target": target, "target_type": target_type, "options": options},
-                        )
-                        resp.raise_for_status()
-                        job_id_cpu = resp.json()["job_id"]
-                except Exception as e:
-                    raise RuntimeError(f"/analyze/start失敗: {type(e).__name__}: {e}")
-
-                # 最大30分ポーリング
-                for _ in range(360):
-                    await asyncio.sleep(5)
-                    try:
-                        async with _httpx.AsyncClient(timeout=600) as client:
-                            r = await client.get(f"{cpu_url}/analyze/result/{job_id_cpu}")
-                            data = r.json()
-                            if data.get("status") == "running":
-                                continue
-                            if data.get("status") == "error":
-                                raise RuntimeError(f"CPUワーカーエラー: {data.get('error') or data}")
-                            return data
-                    except RuntimeError:
-                        raise
-                    except Exception:
-                        # タイムアウト等は無視してリトライ
-                        continue
-                raise RuntimeError("CPUワーカー解析タイムアウト（30分）")
+                async with _httpx.AsyncClient(timeout=1800) as client:
+                    resp = await client.post(
+                        f"{cpu_url}/analyze",
+                        json={"target": target, "target_type": target_type, "options": options},
+                    )
+                    resp.raise_for_status()
+                    return resp.json()
 
             async def _start_and_poll_codeql(analyze_result):
                 """CodeQLをバックグラウンド起動してポーリングで結果取得"""
