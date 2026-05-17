@@ -465,7 +465,7 @@ def build_attacker_prompt(chunk: FunctionChunk, cross_file: str = "") -> str:
         codeql_section = f"\n## CodeQL Finding\n{chunk.codeql_flow}\n"
 
     if chunk.language in ("cpp", "c"):
-        cpp_section = """
+        cpp_section = CPP_CVE_PATTERNS + """
 ## C/C++ Specific Attack Vectors
 1. **Buffer overflow**: array indexing without bounds check, memcpy with attacker-controlled length
 2. **Integer overflow/underflow**: size_t arithmetic, signed/unsigned conversion, multiplication before malloc
@@ -771,7 +771,7 @@ class VulnAnalyzer:
         total = len(chunks)
         # vLLMのmax_num_seqs=32に合わせて同時リクエスト数を制限
         # 多すぎるとKVキャッシュが溢れてスループットが下がる
-        sem = asyncio.Semaphore(64)
+        sem = asyncio.Semaphore(32)
 
         async def _analyze_with_sem(chunk, prompt_type, cross_file, callers, callees):
             async with sem:
@@ -1249,3 +1249,251 @@ async def rank_files_by_risk(
             print(f"  [-] ファイルランキングエラー: {e}")
 
     return rankings
+
+
+# ===========================
+# Vul-RAG: CVEパターンDB（C++/JIT特化）
+# ===========================
+
+CPP_CVE_PATTERNS = """
+## Known Vulnerability Patterns (Vul-RAG)
+Match the code against these real CVE patterns:
+
+[UAF] CVE-2021-30551 (V8): Type confusion in Array.prototype.map — object freed during GC then accessed
+[UAF] CVE-2022-1096 (V8): Type confusion via deoptimization — Map pointer becomes stale after GC
+[BOF] CVE-2021-21220 (V8): OOB write in JIT — array length not re-checked after optimization
+[INT] CVE-2022-2294 (WebRTC): Integer overflow in audio buffer sizing → heap overflow
+[UAF] CVE-2023-2033 (V8): Type confusion in JIT — wrong type assumption after optimization
+[OOB] CVE-2023-3079 (V8): OOB access via hole in array — fast path skips bounds check
+[TYPE] CVE-2024-0519 (V8): OOB memory access in V8 optimizer
+[UAF] generic: delete ptr + ptr used in destructor/callback
+[BOF] generic: memcpy(dst, src, user_controlled_len) without len <= sizeof(dst)
+[INT] generic: size_t a = b - c where b < c (underflow), then malloc(a)
+[DFR] generic: double-free on error path when same ptr freed in catch + finally
+[RACE] generic: shared_ptr used across threads without lock
+
+If the code matches any pattern, flag it with high confidence.
+"""
+
+
+# ===========================
+# ファイル単位解析（Mythos方式）
+# ===========================
+
+async def analyze_file_level(
+    client,
+    model: str,
+    file_path: str,
+    chunks: List[FunctionChunk],
+    omniscient: "OmniscientContext",
+) -> List[VulnSample]:
+    """
+    ファイル全体をLLMに渡して俯瞰的に脆弱性を探す（Mythos方式）。
+    関数バラバラではなくファイル全体のコンテキストで判断する。
+    高priorityファイルのみ対象。
+    """
+    if not chunks:
+        return []
+
+    # ファイル全体のコードを結合（最大8000文字）
+    file_code = ""
+    for c in sorted(chunks, key=lambda x: x.start_line):
+        file_code += f"\n// === {c.function_name} (line {c.start_line}) ===\n{c.code}\n"
+    file_code = file_code[:8000]
+
+    lang = chunks[0].language if chunks else "cpp"
+
+    prompt = f"""You are a world-class vulnerability researcher analyzing an entire file.
+
+## File: {file_path} ({lang})
+## Functions: {[c.function_name for c in chunks[:20]]}
+
+```{lang}
+{file_code}
+```
+
+{CPP_CVE_PATTERNS if lang in ("c", "cpp") else ""}
+
+## Task
+Analyze this ENTIRE FILE holistically:
+1. Identify ALL functions that receive or propagate external/attacker-controlled data
+2. Find cross-function vulnerabilities (function A sanitizes badly, function B trusts it)
+3. Look for object lifecycle issues (allocation in one function, free in another, use in a third)
+4. Find integer arithmetic issues that cross function boundaries
+
+Report the SINGLE most critical finding. Call report_vulnerability.
+If nothing found, still call report_vulnerability with is_vulnerable=false.
+"""
+
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            tools=[REPORT_TOOL],
+            tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
+            max_tokens=1200,
+            temperature=0.1,
+            extra_body={"chat_template_kwargs": {"thinking": False}},
+        )
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            return []
+        args = json.loads(msg.tool_calls[0].function.arguments)
+        if not args.get("is_vulnerable"):
+            return []
+        # VulnSampleを構築（file-level解析はchunks[0]を代表として使用）
+        dummy_chunk = chunks[0]
+        dummy_chunk.file_path = file_path
+        analyzer = VulnAnalyzer.__new__(VulnAnalyzer)
+        analyzer.client = client
+        analyzer.model = model
+        sample = analyzer._build_vuln_sample(args, dummy_chunk)
+        return [sample] if sample else []
+    except Exception as e:
+        print(f"  [-] ファイル単位解析エラー ({file_path}): {e}")
+        return []
+
+
+# ===========================
+# MulVul: マルチエージェントクロスレビュー
+# ===========================
+
+async def mulvul_cross_review(
+    client,
+    model: str,
+    sample: VulnSample,
+    chunk: FunctionChunk,
+) -> bool:
+    """
+    MulVul方式: 1回目の検出結果を別視点のエージェントがレビューする。
+    「これは本当に脆弱性か？」を別プロンプトで確認してFPを削減。
+    """
+    review_prompt = f"""You are a senior security engineer doing a second-pass code review.
+A junior analyst flagged this as vulnerable. Your job is to CHALLENGE their finding.
+
+## Finding
+Function: {chunk.function_name} ({chunk.file_path})
+CWE: {sample.label.cwe}
+Severity: {sample.label.severity}
+Why vulnerable: {sample.reasoning.why_vulnerable if sample.reasoning else ''}
+Why exploitable: {sample.reasoning.why_exploitable if sample.reasoning else ''}
+FP risk noted: {sample.reasoning.false_positive_risk if sample.reasoning else ''}
+
+## Code
+```{chunk.language}
+{chunk.code[:3000]}
+```
+
+## Your task
+1. Can an attacker actually REACH this code path?
+2. Is the dangerous operation actually reachable with attacker-controlled input?
+3. Are there mitigations the junior analyst missed (bounds checks, type guards, compiler protections)?
+4. Is the junior analyst's exploit scenario realistic?
+
+Respond JSON only: {{"confirmed": true/false, "reason": "..."}}
+"""
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": review_prompt}],
+            max_tokens=300,
+            temperature=0.0,
+            extra_body={"chat_template_kwargs": {"thinking": False}},
+        )
+        raw = resp.choices[0].message.content or ""
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        m = re.search(r"\{.*?\}", raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+            if not data.get("confirmed", True):
+                print(f"  [MulVul] FP rejected: {chunk.function_name} — {data.get('reason','')[:80]}")
+                return False
+    except Exception:
+        pass
+    return True
+
+
+# ===========================
+# LLMDFA: LLMによるデータフロー解析
+# ===========================
+
+async def llmdfa_analyze(
+    client,
+    model: str,
+    chunks: List[FunctionChunk],
+    omniscient: "OmniscientContext",
+) -> List[FunctionChunk]:
+    """
+    LLMDFA (NeurIPS 2024)方式: LLMがデータフローを追跡してtaintパスを発見。
+    静的taint解析で見逃したパスをLLMで補完する。
+    高priorityチャンクの上位50件のみ対象（コスト制限）。
+    """
+    # 高priorityかつtaintなしのチャンクを対象
+    candidates = [c for c in chunks
+                  if not (getattr(c, 'taint_sources', []) or getattr(c, 'taint_sinks', []))
+                  and c.priority <= 5
+                  and c.language in ("c", "cpp", "java", "python", "javascript")][:50]
+
+    if not candidates:
+        return chunks
+
+    # ファイルごとにグループ化して一括解析（コスト削減）
+    file_groups: Dict[str, List[FunctionChunk]] = defaultdict(list)
+    for c in candidates:
+        file_groups[c.file_path].append(c)
+
+    for file_path, file_chunks in list(file_groups.items())[:10]:
+        func_list = "\n".join(
+            f"- {c.function_name}: {c.code.split(chr(10))[0][:80]}"
+            for c in file_chunks[:10]
+        )
+        prompt = f"""Identify data flow sources and sinks in these {file_chunks[0].language} functions.
+
+File: {file_path}
+Functions:
+{func_list}
+
+For each function, determine:
+- Is it a SOURCE (receives external/attacker-controlled input)?
+- Is it a SINK (performs dangerous operation with its input)?
+- Does it PROPAGATE taint from parameter to return value?
+
+Respond JSON only:
+{{"functions": [{{"name": "...", "is_source": bool, "is_sink": bool, "propagates": bool, "reason": "..."}}]}}
+"""
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=600,
+                temperature=0.0,
+                extra_body={"chat_template_kwargs": {"thinking": False}},
+            )
+            raw = resp.choices[0].message.content or ""
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            m = re.search(r"\{[\s\S]+\}", raw)
+            if not m:
+                continue
+            data = json.loads(m.group(0))
+            func_map = {c.function_name: c for c in file_chunks}
+            for entry in data.get("functions", []):
+                fn = entry.get("name", "")
+                if fn not in func_map:
+                    continue
+                c = func_map[fn]
+                if entry.get("is_source"):
+                    src = f"[LLMDFA] {entry.get('reason','')[:60]}"
+                    if src not in c.taint_sources:
+                        c.taint_sources.append(src)
+                if entry.get("is_sink"):
+                    sink = f"[LLMDFA] {entry.get('reason','')[:60]}"
+                    if sink not in c.taint_sinks:
+                        c.taint_sinks.append(sink)
+                        c.priority = max(1, c.priority - 2)  # priorityを上げる
+        except Exception as e:
+            print(f"  [-] LLMDFA エラー ({file_path}): {e}")
+
+    return chunks

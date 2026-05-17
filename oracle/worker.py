@@ -353,7 +353,6 @@ class ScanWorker:
                 logger.warning(f"ファイルランキングエラー: {e}")
 
             # IRIS方式 (ICLR 2025): LLMがアプリ固有のソース/シンク仕様を動的生成
-            # 標準CodeQLクエリで見逃すカスタムソース・シンクを補完する
             try:
                 from oracle.cpu_worker_server import iris_generate_codeql_specs
                 iris_results = await iris_generate_codeql_specs(
@@ -366,6 +365,43 @@ class ScanWorker:
                     self._log(job_id, f"  IRIS: {len(iris_results)}件のカスタムシンク検出\n")
             except Exception as e:
                 logger.warning(f"IRISエラー: {e}")
+
+            # LLMDFA (NeurIPS 2024): LLMによるデータフロー解析でtaintパスを補完
+            try:
+                from analyzer.llm import llmdfa_analyze
+                chunks = await llmdfa_analyze(
+                    client=llm_analyzer.client,
+                    model=LLM_MODEL,
+                    chunks=chunks,
+                    omniscient=omniscient,
+                )
+                llmdfa_tainted = sum(1 for c in chunks if any("[LLMDFA]" in s for s in getattr(c, 'taint_sources', []) + getattr(c, 'taint_sinks', [])))
+                if llmdfa_tainted:
+                    self._log(job_id, f"  LLMDFA: {llmdfa_tainted}件の追加taintパス検出\n")
+            except Exception as e:
+                logger.warning(f"LLMDFAエラー: {e}")
+
+            # ファイル単位解析（Mythos方式）: 高priorityファイルをまとめてLLMに渡す
+            file_level_vulns: List[VulnSample] = []
+            try:
+                from analyzer.llm import analyze_file_level
+                from collections import defaultdict as _dd
+                file_groups = _dd(list)
+                for c in chunks:
+                    if c.priority <= 4:  # 高priorityのみ
+                        file_groups[c.file_path].append(c)
+                file_tasks = [
+                    analyze_file_level(llm_analyzer.client, LLM_MODEL, fp, fc, omniscient)
+                    for fp, fc in list(file_groups.items())[:15]  # 最大15ファイル
+                ]
+                file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
+                for r in file_results:
+                    if isinstance(r, list):
+                        file_level_vulns.extend(r)
+                if file_level_vulns:
+                    self._log(job_id, f"  ファイル単位解析: {len(file_level_vulns)}件検出\n")
+            except Exception as e:
+                logger.warning(f"ファイル単位解析エラー: {e}")
 
             # 高優先度（CodeQL確認済み）はReActループで先に処理
             react_chunks = [
@@ -453,12 +489,33 @@ class ScanWorker:
             await self.cpu_manager.stop_pod()
             self._log(job_id, "  CPUポッド停止\n")
 
-            all_vulns: List[VulnSample] = react_vulns + single_results + compound_results
+            all_vulns: List[VulnSample] = react_vulns + single_results + compound_results + file_level_vulns
             self._log(
                 job_id,
                 f"  脆弱性候補: {len(all_vulns)}件 "
-                f"(ReAct:{len(react_vulns)} 単一:{len(single_results)} 複合:{len(compound_results)})\n",
+                f"(ReAct:{len(react_vulns)} 単一:{len(single_results)} 複合:{len(compound_results)} ファイル:{len(file_level_vulns)})\n",
             )
+
+            # MulVul: マルチエージェントクロスレビューでFPを削減
+            if all_vulns:
+                try:
+                    from analyzer.llm import mulvul_cross_review
+                    chunk_map = {c.function_name: c for c in chunks}
+                    mulvul_tasks = []
+                    for s in all_vulns:
+                        fn = s.context.function if s.context else ""
+                        c = chunk_map.get(fn) or (chunks[0] if chunks else None)
+                        if c:
+                            mulvul_tasks.append(mulvul_cross_review(llm_analyzer.client, LLM_MODEL, s, c))
+                    mulvul_results = await asyncio.gather(*mulvul_tasks, return_exceptions=True)
+                    before = len(all_vulns)
+                    all_vulns = [s for s, ok in zip(all_vulns, mulvul_results)
+                                 if not isinstance(ok, Exception) and ok]
+                    dropped = before - len(all_vulns)
+                    if dropped:
+                        self._log(job_id, f"  MulVul: {dropped}件をFPとして除去\n")
+                except Exception as e:
+                    logger.warning(f"MulVulエラー: {e}")
 
             # ===========================
             # Step 5: CPUポッドでASan/libFuzzer検証
