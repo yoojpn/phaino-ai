@@ -867,13 +867,16 @@ class VulnAnalyzer:
                 ],
                 tools=[REPORT_TOOL],
                 tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-                max_tokens=700,
+                max_tokens=1200,
                 temperature=0.1,
                 extra_body={"chat_template_kwargs": {"thinking": False}},
             )
 
             # tool_callsから引数を取り出す
             msg = resp.choices[0].message
+            finish_reason = resp.choices[0].finish_reason
+            if finish_reason == "length":
+                print(f"  [!] トークン不足でツールコール切れ ({chunk.function_name}): max_tokensを増やす必要あり")
             if not msg.tool_calls:
                 # フォールバック: contentをJSONとして解析を試みる
                 return self._parse_json_fallback(
@@ -901,7 +904,7 @@ class VulnAnalyzer:
                         ],
                         tools=[REPORT_TOOL],
                         tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-                        max_tokens=700,
+                        max_tokens=1200,
                         temperature=0.1,
                         extra_body={"chat_template_kwargs": {"thinking": False}},
                     )
