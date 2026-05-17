@@ -755,7 +755,7 @@ CODEQL_HEAVY_LANGS = {"javascript", "java"}
 
 
 def detect_languages(files) -> List[str]:
-    """ファイルリストから使用言語を検出。重い言語はファイル数が少ない場合スキップ"""
+    """ファイルリストから使用言語を検出。主要言語（全体の10%以上）のみCodeQL実行"""
     lang_counts: Dict[str, int] = {}
     for f in files:
         lang = getattr(f, "language", None) or ""
@@ -763,8 +763,14 @@ def detect_languages(files) -> List[str]:
         if cq_lang:
             lang_counts[cq_lang] = lang_counts.get(cq_lang, 0) + 1
 
+    total = sum(lang_counts.values()) or 1
     result = []
     for lang, count in lang_counts.items():
+        ratio = count / total
+        # 全体の10%未満の言語はスキップ（ビルドスクリプト等を除外）
+        if ratio < 0.10:
+            logger.info(f"  CodeQL {lang}: 比率{ratio:.1%}({count}件)のためスキップ")
+            continue
         # 重い言語は10ファイル以上ある場合のみ実行
         if lang in CODEQL_HEAVY_LANGS and count < 10:
             logger.info(f"  CodeQL {lang}: ファイル数{count}件のためスキップ")
