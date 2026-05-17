@@ -41,6 +41,8 @@ class ScanWorker:
         self.cpu_manager = cpu_manager  # CPU pod manager
         self.report_dir = report_dir
         self._current_job_id: Optional[str] = None
+        self._finalize_requested: set = set()  # 途中終了リクエストされたjob_id
+        self._current_vulns: dict = {}  # job_id → 現在の候補リスト
 
     async def _notify_discord(self, message: str):
         """Discordのwebhookで通知を送る"""
@@ -445,7 +447,12 @@ class ScanWorker:
                 async with counter_lock:
                     single_done[0]  = len(react_chunks) + done
                     single_vulns[0] = len(react_vulns) + vulns
+                    # 現在の候補数をworkerに記録（API経由でUIに公開）
+                    self._current_vulns[job_id] = single_vulns[0] + compound_vulns[0]
                 await _log_progress()
+                # 途中終了リクエストがあればCancelledErrorを投げて中断
+                if job_id in self._finalize_requested:
+                    raise asyncio.CancelledError("finalize_requested")
 
             async def run_compound():
                 results = []
@@ -478,12 +485,19 @@ class ScanWorker:
                         results.append(r)
                 return results
 
-            single_results, compound_results = await asyncio.gather(
-                llm_analyzer.analyze_batch(
-                    remaining_chunks, progress_callback=batch_progress, omniscient=omniscient
-                ),
-                run_compound(),
-            )
+            try:
+                single_results, compound_results = await asyncio.gather(
+                    llm_analyzer.analyze_batch(
+                        remaining_chunks, progress_callback=batch_progress, omniscient=omniscient
+                    ),
+                    run_compound(),
+                )
+            except asyncio.CancelledError:
+                # 途中終了リクエスト — ここまでの結果でレポート生成に進む
+                self._finalize_requested.discard(job_id)
+                single_results = llm_analyzer._uncertain + (getattr(llm_analyzer, '_results', []) or [])
+                compound_results = []
+                self._log(job_id, "  途中終了: ここまでの候補でレポート生成に進みます\n")
 
             # CPUポッドをLLM解析完了後に停止
             await self.cpu_manager.stop_pod()

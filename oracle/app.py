@@ -462,6 +462,31 @@ async def api_a40_available(request: Request):
     return JSONResponse({"a40_available": a40_available})
 
 
+@app.post("/api/job/{job_id}/finalize")
+async def api_finalize_job(request: Request, job_id: str):
+    """途中終了: その時点の候補でレポート生成に進む"""
+    db: JobDB = request.app.state.db
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "running":
+        raise HTTPException(status_code=400, detail="実行中のジョブのみ途中終了できます")
+    worker: "ScanWorker" = request.app.state.worker
+    worker._finalize_requested.add(job_id)
+    return JSONResponse({"status": "finalize_requested"})
+
+
+@app.get("/api/job/{job_id}/progress")
+async def api_job_progress(request: Request, job_id: str):
+    """現在の候補数をリアルタイムで返す"""
+    worker: "ScanWorker" = request.app.state.worker
+    vuln_count = worker._current_vulns.get(job_id, 0)
+    db: JobDB = request.app.state.db
+    job = db.get_job(job_id)
+    status = job["status"] if job else "unknown"
+    return JSONResponse({"vuln_count": vuln_count, "status": status})
+
+
 @app.post("/api/job/{job_id}/cancel")
 async def api_cancel_job(request: Request, job_id: str):
     """ジョブキャンセル"""

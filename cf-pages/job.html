@@ -457,9 +457,15 @@ a:hover { color: var(--accent-hover); }
       </div>
       <div class="job-actions">
         <button class="btn-danger" id="cancel-btn" onclick="cancelJob()" style="display:none">キャンセル</button>
+        <button class="btn-secondary" id="finalize-btn" onclick="finalizeJob()" style="display:none">⏹ 途中終了してレポート生成</button>
         <a href="#" id="report-link" class="btn-primary" download style="display:none">📄 レポートDL</a>
         <a href="#" id="uncertain-link" class="btn-secondary" download style="display:none">⚠️ 曖昧レポートDL</a>
       </div>
+    </div>
+
+    <!-- リアルタイム候補数 -->
+    <div id="live-vuln-box" style="display:none; margin-top:8px; padding:8px 12px; background:var(--surface2); border-radius:6px; font-size:0.85rem;">
+      現在の脆弱性候補: <span id="live-vuln-count" style="color:var(--accent); font-weight:bold;">0</span> 件
     </div>
 
     <!-- オプション -->
@@ -603,6 +609,23 @@ let polling = null;
 if (["queued", "running"].includes(INITIAL_STATUS)) {
   polling = setInterval(pollLog, 2000);
   document.getElementById("cancel-btn").style.display = "";
+  if (INITIAL_STATUS === "running") {
+    document.getElementById("finalize-btn").style.display = "";
+    document.getElementById("live-vuln-box").style.display = "";
+    setInterval(pollProgress, 5000);
+  }
+}
+
+async function pollProgress() {
+  try {
+    const resp = await fetch(`https://api.phaino-ai.com/api/job/${JOB_ID}/progress`, { credentials: "include" });
+    const data = await resp.json();
+    document.getElementById("live-vuln-count").textContent = data.vuln_count ?? 0;
+    if (!["queued", "running"].includes(data.status)) {
+      document.getElementById("live-vuln-box").style.display = "none";
+      document.getElementById("finalize-btn").style.display = "none";
+    }
+  } catch(e) {}
 }
 
 async function pollLog() {
@@ -669,8 +692,24 @@ async function pollLog() {
 }
 
 // ===========================
-// キャンセル
+// キャンセル / 途中終了
 // ===========================
+async function finalizeJob() {
+  if (!confirm("途中終了してここまでの候補でレポートを生成しますか？")) return;
+  try {
+    const resp = await fetch(`https://api.phaino-ai.com/api/job/${JOB_ID}/finalize`, { method: "POST", credentials: "include" });
+    if (resp.ok) {
+      document.getElementById("finalize-btn").style.display = "none";
+      alert("途中終了を受け付けました。レポート生成中...");
+    } else {
+      const err = await resp.json();
+      alert("エラー: " + (err.detail || resp.statusText));
+    }
+  } catch(e) {
+    alert("エラー: " + e.message);
+  }
+}
+
 async function cancelJob() {
   if (!confirm("このジョブをキャンセルしますか？")) return;
   try {

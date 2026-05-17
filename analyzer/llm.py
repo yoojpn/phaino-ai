@@ -824,12 +824,11 @@ class VulnAnalyzer:
 
         # 全タスクを一気に投げてセマフォで流量制御
         done_count = 0
+        self._results = results  # 途中終了時のアクセス用
         for coro in asyncio.as_completed(tasks):
             r = await coro
             done_count += 1
-            if r is None:
-                pass
-            else:
+            if r is not None:
                 conf = r.context.confidence if r.context else 50
                 if r.label.is_vulnerable:
                     if conf >= 40:
