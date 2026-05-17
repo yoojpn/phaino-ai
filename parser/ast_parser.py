@@ -300,7 +300,14 @@ class ASTParser:
             # JS/Node
             r"req\.body|req\.query|req\.params|req\.headers|"
             r"formData|process\.env|document\.location|window\.location|"
-            r"document\.URL|document\.referrer",
+            r"document\.URL|document\.referrer|"
+            # C/C++ — 外部入力を受け取るAPI
+            r"\bread\s*\(|\bfread\s*\(|\bfgets\s*\(|\bgets\s*\(|\bgetline\s*\(|"
+            r"\brecv\s*\(|\brecvfrom\s*\(|\brecvmsg\s*\(|"
+            r"\bgetenv\s*\(|\bargv\b|\bstdin\b|"
+            r"\batoi\s*\(|\batol\s*\(|\batoll\s*\(|\bstrtol\s*\(|\bstrtoul\s*\(|"
+            r"\bsscanf\s*\(|\bfscanf\s*\(|\bscanf\s*\(|"
+            r"\bmmap\s*\(|ReadFile\s*\(|ReadProcessMemory\s*\(",
             re.IGNORECASE
         )
         SINK_CALL_PATTERNS = re.compile(
@@ -332,7 +339,18 @@ class ASTParser:
             # SSRF / redirect
             r"requests\.get|requests\.post|urllib\.request|fetch\s*\(|"
             r"HttpURLConnection|URL\s*\(\.\s*openConnection|"
-            r"response\.sendRedirect|redirect\s*\(",
+            r"response\.sendRedirect|redirect\s*\(|"
+            # C/C++ 危険シンク
+            r"\bmemcpy\s*\(|\bmemmove\s*\(|\bstrcpy\s*\(|\bstrcat\s*\(|"
+            r"\bsprintf\s*\(|\bvsprintf\s*\(|\bsnprintf\s*\(|"
+            r"\bstrcmp\s*\(|\bstrncpy\s*\(|\bstrncat\s*\(|"
+            r"\bmalloc\s*\(|\brealloc\s*\(|\balloca\s*\(|"
+            r"\bfree\s*\(|\bdelete\s+|\bdelete\[\]|"
+            r"\bwrite\s*\(|\bfwrite\s*\(|\bsend\s*\(|\bsendto\s*\(|"
+            r"\bsystem\s*\(|\bpopen\s*\(|\bexecl\s*\(|\bexecv\s*\(|"
+            r"\bprintf\s*\(|\bfprintf\s*\(|"
+            r"reinterpret_cast|static_cast|const_cast|"
+            r"\[\s*\w+\s*\]",  # 配列インデックスアクセス
             re.IGNORECASE
         )
 
