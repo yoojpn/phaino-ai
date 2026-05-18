@@ -397,61 +397,24 @@ def build_structural_prompt(chunk: FunctionChunk, cross_file: str = "") -> str:
     if chunk.annotations:
         class_info += f"\n## Annotations: {' '.join(chunk.annotations)}"
 
-    return f"""Analyze this {chunk.language} code for security vulnerabilities.
+    return f"""You are an adversarial security researcher hunting for UNKNOWN vulnerabilities — bugs that don't appear in any CVE database yet.
 
-## File: {chunk.file_path} (lines {chunk.start_line}-{chunk.end_line}){class_info}
-## Function: {chunk.function_name}
-
+## `{chunk.function_name}` in `{chunk.file_path}`
 ```{chunk.language}
 {chunk.code}
 ```
-{f"## Cross-file Context{chr(10)}{cross_file}" if cross_file else ""}
+{f"## Context{chr(10)}{cross_file}" if cross_file else ""}
+{cpp_section}
 
-## Analysis Instructions
+## Hunt for these (prioritize novel patterns):
+1. **Unvalidated assumptions** — what does this code ASSUME is true that an attacker could violate?
+2. **Edge cases** — empty input, max values, concurrent calls, error paths left half-initialized
+3. **Arithmetic bugs** — overflow, underflow, sign confusion, truncation on type cast
+4. **Memory lifetime** — object freed/moved while still referenced; pointer stored across realloc
+5. **Logic inversion** — condition that looks safe but is wrong under a specific combination of inputs
+6. **Missing check** — caller assumes this function validates X but it doesn't
 
-**CRITICAL: Do NOT reference CVE databases or known vulnerability patterns.**
-**Reason purely from the code structure.**
-
-**Step 1: Map all data sources**
-What inputs does this function accept?
-- HTTP parameters, headers, cookies, body
-- Function arguments (are they user-controlled from callers above?)
-- File reads, environment variables, database values
-
-**Step 2: Trace every data path**
-Follow each input through ALL transformations:
-- String operations (concat, format, interpolation)
-- Type conversions, conditional branches, function calls
-- Cross-file flows shown in context above
-
-**Step 3: Identify dangerous sinks**
-Where does user-controlled data end up?
-- SQL/NoSQL queries, OS commands, file paths
-- Deserialization, HTML output, HTTP requests, auth decisions
-
-**Step 4: Check sanitization gaps**
-For each source->sink path:
-- Is there validation? Can it be bypassed?
-- Is there encoding? Is it correct for this context?
-
-**Step 5: Think as an attacker**
-What specific payload would you send? What would happen? What would you gain?
-
-**Step 6: Adversarial self-check (REQUIRED)**
-Argue why this is NOT exploitable:
-- Is there a framework/middleware handling it?
-- Is the input actually user-controlled?
-- Is the sink actually reachable?
-Then conclude: "Despite this, the vulnerability holds because..." OR "Conclusion: false positive."
-
-**Step 7: Assign confidence score (0-100)**
-- 90-100: Trivially exploitable, clear data flow, no mitigations
-- 70-89: Likely exploitable, minor uncertainty
-- 40-69: Plausible attack path, some uncertainty (→ uncertain report, still valuable)
-- 25-39: Weak signal but worth flagging (→ uncertain report)
-- 0-24: Likely false positive (→ skip)
-
-Call report_vulnerability with your complete findings.
+Report even at confidence 25. Err on the side of reporting. Call report_vulnerability.
 """
 
 
@@ -783,43 +746,19 @@ class VulnAnalyzer:
             r'(valid|sanitiz|check|verify|auth|ensure|assert|guard|enforce|init|setup|create|alloc|parse|decode|deserializ)',
             re.IGNORECASE
         )
-        # 攻撃者視点が効く危険シンク関連パターン
-        ATTACKER_PATTERNS = re.compile(
-            r'(exec|eval|query|render|send|write|copy|memcpy|sprintf|format|request|response|upload|download|open|read|recv)',
-            re.IGNORECASE
-        )
         for chunk in chunks:
-            cross_file = omniscient.get_cross_file_context(chunk, max_chars=6000) if omniscient else ""
-            callers = list(omniscient.reverse_graph.get(chunk.function_name, []))[:8] if omniscient else []
-            callees = list(omniscient.call_graph.get(chunk.function_name, []))[:8] if omniscient else []
+            cross_file = omniscient.get_cross_file_context(chunk, max_chars=3000) if omniscient else ""
+            callers = list(omniscient.reverse_graph.get(chunk.function_name, []))[:4] if omniscient else []
+            callees = list(omniscient.call_graph.get(chunk.function_name, []))[:4] if omniscient else []
 
-            has_taint = getattr(chunk, 'propagated_sources', []) and chunk.taint_sinks
             fn = chunk.function_name
-
             if chunk.language == "php":
                 prompt_type = "php"
-            elif getattr(chunk, 'codeql_confirmed', False):
-                # CodeQL確認済み → attacker（実証パス確認）
-                prompt_type = "attacker"
-            elif has_taint and chunk.priority >= 6:
-                # taintパス確認済み + 高priority → semantic（意味論的矛盾を深掘り）
-                prompt_type = "semantic"
-            elif has_taint:
-                # taintパスあり → attacker（データフロー追跡）
-                prompt_type = "attacker"
             elif SPEC_PATTERNS.search(fn):
-                # validate/auth/parse系 → spec（仕様違反を探す）
                 prompt_type = "spec"
-            elif ATTACKER_PATTERNS.search(fn) or chunk.language in ("c", "cpp"):
-                # 危険シンク系 or C/C++ → attacker
-                prompt_type = "attacker"
-            elif chunk.priority >= 6:
-                # 高priority → semantic
-                prompt_type = "semantic"
-            elif chunk.priority >= 3:
-                prompt_type = "attacker"
             else:
-                prompt_type = "structural"
+                # 全関数をattacker視点で統一（高速・安価・検知率優先）
+                prompt_type = "attacker"
             tasks.append(_analyze_with_sem(chunk, prompt_type, cross_file, callers, callees))
 
         # 全タスクを一気に投げてセマフォで流量制御
@@ -831,7 +770,7 @@ class VulnAnalyzer:
             if r is not None:
                 conf = r.context.confidence if r.context else 50
                 if r.label.is_vulnerable:
-                    if conf >= 40:
+                    if conf >= 25:
                         results.append(r)
                     else:
                         uncertain.append(r)
@@ -866,7 +805,7 @@ class VulnAnalyzer:
                 ],
                 tools=[REPORT_TOOL],
                 tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-                max_tokens=1200,
+                max_tokens=600,
                 temperature=0.1,
                 extra_body={"chat_template_kwargs": {"thinking": False}},
             )
@@ -903,7 +842,7 @@ class VulnAnalyzer:
                         ],
                         tools=[REPORT_TOOL],
                         tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-                        max_tokens=1200,
+                        max_tokens=600,
                         temperature=0.1,
                         extra_body={"chat_template_kwargs": {"thinking": False}},
                     )
@@ -1333,7 +1272,7 @@ If nothing found, still call report_vulnerability with is_vulnerable=false.
             ],
             tools=[REPORT_TOOL],
             tool_choice={"type": "function", "function": {"name": "report_vulnerability"}},
-            max_tokens=1200,
+            max_tokens=600,
             temperature=0.1,
             extra_body={"chat_template_kwargs": {"thinking": False}},
         )
